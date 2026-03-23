@@ -180,6 +180,21 @@ class HierarchicalSummarizer:
         except Exception:
             return None
 
+    def _extract_json_array(self, text: str) -> Optional[list]:
+        """解析 JSON 数组，兼容 ```json fenced block。"""
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, list):
+                return parsed
+            return None
+        except Exception:
+            return None
+
     # MARK: - Provider Clients
     # OpenAI-compatible（OpenAI/OpenRouter/DeepSeek/xAI）统一走 Responses API。
     def _call_openai_compatible(

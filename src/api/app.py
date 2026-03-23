@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
@@ -15,7 +18,8 @@ from ..aggregator.scheduler import HourlyAggregator
 from ..common import get_secret_cipher, load_config, mask_secret
 from ..storage import Database, get_db, init_db
 
-app = FastAPI(title="Discord Thai Collector", version="0.2.0")
+app = FastAPI(title="Discord Thai Collector", version="0.3.0")
+_task_executor = ThreadPoolExecutor(max_workers=2)
 cipher = get_secret_cipher()
 
 
@@ -78,7 +82,7 @@ def _database_url_from_config(config: dict) -> Optional[str]:
     return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
 
 
-# 供“合规删除后重算窗口”调用，复用聚合主流程。
+# 供"合规删除后重算窗口"调用，复用聚合主流程。
 def _build_aggregator() -> HourlyAggregator:
     config = load_config()
     db = get_db()
@@ -145,6 +149,12 @@ class LLMProviderToggleRequest(BaseModel):
 
 class AnalysisRunRequest(BaseModel):
     mode: str = Field(default="today", pattern="^(today|hourly)$")
+    timezone: str = "Asia/Shanghai"
+    force_llm: bool = True
+
+
+class AsyncAnalysisRequest(BaseModel):
+    mode: str = Field(default="today", pattern="^(today|hourly|daily_digest)$")
     timezone: str = "Asia/Shanghai"
     force_llm: bool = True
 
@@ -334,8 +344,256 @@ def compliance_purge(req: CompliancePurgeRequest) -> dict:
     return db.purge_raw_messages(retention_days=req.retention_days, hard_delete=req.hard_delete)
 
 
+# MARK: - V2 API Endpoints
+# 面向前端的结构化中文 JSON，一次请求获取全部数据。
+
+@app.get("/api/v2/dashboard")
+def v2_dashboard(hours: int = Query(default=24, ge=1, le=168)) -> dict:
+    """一次请求获取前端所需的全部数据。"""
+    db = get_db()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    stats = db.get_dashboard_stats(hours=hours)
+    keywords = db.get_recent_keywords_with_translations(hours=hours, limit=60)
+    runs = db.get_recent_analysis_runs(limit=24)
+    demand_signals = _aggregate_demand_signals(runs)
+    hourly_volumes = db.get_hourly_message_volumes(
+        window_start=cutoff,
+        window_end=datetime.now(timezone.utc),
+    )
+
+    # 构建词云数据
+    keyword_cloud = []
+    seen = set()
+    for kw in keywords:
+        cn = kw.get("keyword_cn", kw["keyword"])
+        if cn in seen:
+            continue
+        seen.add(cn)
+        keyword_cloud.append({
+            "word_cn": cn,
+            "word_thai": kw["keyword"],
+            "weight": round(kw["tfidf_score"], 4),
+        })
+        if len(keyword_cloud) >= 30:
+            break
+
+    # 从最近的 runs 提取话题（如果有）
+    top_topics = []
+    for run in runs[:6]:
+        for kw in run.get("keywords", [])[:3]:
+            keyword = str(kw.get("keyword", ""))
+            cn = next((k.get("keyword_cn", keyword) for k in keywords if k["keyword"] == keyword), keyword)
+            if cn not in [t.get("title_cn") for t in top_topics]:
+                top_topics.append({
+                    "title_cn": cn,
+                    "keywords_cn": [cn],
+                    "message_count": run.get("message_count", 0),
+                    "heat_score": round(float(kw.get("tfidf_score", 0)) * 2, 2),
+                })
+            if len(top_topics) >= 5:
+                break
+        if len(top_topics) >= 5:
+            break
+
+    return {
+        "metrics": {
+            "total_24h": stats["total_messages"],
+            "thai_24h": stats["thai_messages"],
+            "thai_ratio": f"{stats['thai_ratio']:.1f}%",
+            "active_users_24h": stats.get("active_users", 0),
+            "active_provider": stats.get("active_llm_provider"),
+        },
+        "hourly_volumes": hourly_volumes,
+        "top_topics": top_topics,
+        "demand_signals": [
+            {
+                "signal_cn": sig["signal"],
+                "count": sig["count"],
+                "example": sig.get("example", ""),
+            }
+            for sig in demand_signals
+        ],
+        "keyword_cloud": keyword_cloud,
+        "services": stats.get("services", []),
+    }
+
+
+@app.get("/api/v2/daily-digest")
+def v2_daily_digest(
+    date: Optional[str] = Query(default=None, description="Date in YYYY-MM-DD format"),
+    timezone_name: str = Query(default="Asia/Bangkok", alias="timezone"),
+) -> dict:
+    """获取每日中文摘要。"""
+    db = get_db()
+
+    if date:
+        try:
+            target = datetime.strptime(date, "%Y-%m-%d")
+            try:
+                local_tz = ZoneInfo(timezone_name)
+            except Exception:
+                local_tz = timezone.utc
+            target = target.replace(tzinfo=local_tz)
+        except ValueError:
+            return {"error": f"Invalid date format: {date}, expected YYYY-MM-DD"}
+    else:
+        try:
+            local_tz = ZoneInfo(timezone_name)
+        except Exception:
+            local_tz = timezone.utc
+        target = (datetime.now(timezone.utc).astimezone(local_tz) - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+    digest = db.get_daily_digest(target)
+
+    if digest:
+        return {
+            "date": date or target.strftime("%Y-%m-%d"),
+            "summary_cn": digest["summary_cn"],
+            "metrics": {
+                "total_messages": digest["total_messages"],
+                "thai_messages": digest["thai_messages"],
+                "active_users": digest["active_users"],
+            },
+            "top_topics": digest["top_topics"],
+            "demand_signals": digest["demand_signals"],
+            "keyword_cloud": digest["keyword_cloud"],
+            "hourly_volumes": digest["hourly_volumes"],
+        }
+
+    # 如果没有缓存的 digest，实时生成
+    aggregator = _build_aggregator()
+    try:
+        digest_data = aggregator.generate_daily_digest(
+            timezone_name=timezone_name,
+            target_date=target,
+        )
+        return {
+            "date": date or target.strftime("%Y-%m-%d"),
+            "summary_cn": digest_data.get("summary_cn", ""),
+            "metrics": {
+                "total_messages": digest_data.get("total_messages", 0),
+                "thai_messages": digest_data.get("thai_messages", 0),
+                "active_users": digest_data.get("active_users", 0),
+            },
+            "top_topics": digest_data.get("top_topics", []),
+            "demand_signals": digest_data.get("demand_signals", []),
+            "keyword_cloud": digest_data.get("keyword_cloud", []),
+            "hourly_volumes": digest_data.get("hourly_volumes", []),
+        }
+    except Exception as exc:
+        return {"error": str(exc), "date": date or target.strftime("%Y-%m-%d")}
+
+
+@app.get("/api/v2/trends")
+def v2_trends(
+    days: int = Query(default=7, ge=1, le=30),
+    limit: int = Query(default=20, ge=1, le=50),
+) -> dict:
+    """获取过去 N 天的关键词趋势。"""
+    db = get_db()
+    keyword_trends = db.get_keyword_trends(days=days, limit=limit)
+
+    # 按信号维度也做趋势
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    runs = db.get_recent_analysis_runs(limit=days * 24)
+
+    from collections import defaultdict
+    signal_daily: dict = defaultdict(lambda: defaultdict(int))
+    for run in runs:
+        ws = run.get("window_start", "")
+        if ws < cutoff.isoformat():
+            continue
+        day_str = ws[:10]
+        for sig in run.get("demand_signals", []) or []:
+            signal = str(sig.get("signal", ""))
+            count = int(sig.get("count", 1))
+            signal_daily[signal][day_str] += count
+
+    signal_trends = []
+    for signal, daily in sorted(signal_daily.items(), key=lambda x: sum(x[1].values()), reverse=True)[:10]:
+        dates = sorted(daily.keys())
+        counts = [daily[d] for d in dates]
+        total = sum(counts)
+
+        if len(counts) >= 2:
+            recent = sum(counts[-2:])
+            earlier = sum(counts[:2]) if len(counts) >= 4 else counts[0]
+            if earlier > 0 and recent / max(earlier, 1) > 1.5:
+                status = "上升"
+            elif earlier > 0 and recent / max(earlier, 1) < 0.5:
+                status = "下降"
+            else:
+                status = "稳定"
+        else:
+            status = "数据不足"
+
+        signal_trends.append({
+            "signal_cn": signal,
+            "dates": [d[5:] for d in dates],
+            "daily_counts": counts,
+            "total": total,
+            "status": status,
+        })
+
+    return {
+        "days": days,
+        "topic_trends": [
+            {
+                "topic_cn": t["keyword_cn"],
+                "topic_thai": t["keyword_thai"],
+                "dates": t["dates"],
+                "daily_counts": t["daily_counts"],
+                "total": t["total"],
+                "status": t["status"],
+            }
+            for t in keyword_trends
+        ],
+        "signal_trends": signal_trends,
+    }
+
+
+@app.get("/api/v2/translations")
+def v2_translations(limit: int = Query(default=500, ge=1, le=5000)) -> list[dict]:
+    """获取已缓存的关键词翻译。"""
+    db = get_db()
+    return db.get_all_translations(limit=limit)
+
+
+# MARK: - V2 Async Analysis
+@app.post("/api/v2/analysis/run")
+def v2_run_analysis_async(req: AsyncAnalysisRequest) -> dict:
+    """异步触发分析任务，立即返回 task_id。"""
+    db = get_db()
+    task_id = str(uuid.uuid4())
+    db.create_analysis_task(task_id=task_id, mode=req.mode)
+
+    aggregator = _build_aggregator()
+    _task_executor.submit(
+        aggregator.run_async_analysis,
+        task_id=task_id,
+        mode=req.mode,
+        timezone_name=req.timezone,
+        force_llm=req.force_llm,
+    )
+
+    return {"task_id": task_id, "status": "pending"}
+
+
+@app.get("/api/v2/analysis/tasks/{task_id}")
+def v2_get_task_status(task_id: str) -> dict:
+    """查询异步分析任务进度。"""
+    db = get_db()
+    task = db.get_analysis_task(task_id)
+    if task is None:
+        return {"error": "Task not found", "task_id": task_id}
+    return task
+
+
 # MARK: - Dashboard Page
-# 页面采用“单文件模板”方式，便于快速内嵌发布与迁移。
+# 页面采用"单文件模板"方式，便于快速内嵌发布与迁移。
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> str:
     return """

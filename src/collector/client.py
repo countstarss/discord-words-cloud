@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Set
 
 import discord
 
+from ..aggregator.dedup import MessageDeduplicator
 from ..processor import LanguageDetector, TextCleaner, ThaiTokenizer
 from ..storage import Database
 
@@ -51,6 +52,7 @@ class DiscordCollector(discord.Client):
             min_token_length=int(processor_cfg.get("min_token_length", 1)),
         )
         self.min_text_length = int(processor_cfg.get("min_text_length", 1))
+        self.deduplicator = MessageDeduplicator()
 
         intents = discord.Intents.default()
         intents.guilds = True
@@ -168,6 +170,14 @@ class DiscordCollector(discord.Client):
             cleaned_text = self.cleaner.clean(message.content)
             tokens = self.tokenizer.tokenize(cleaned_text)
 
+        # V2: 计算内容指纹和质量评分
+        content_hash = self.deduplicator.compute_hash(cleaned_text or message.content)
+        quality_score = self.deduplicator.compute_quality_score(
+            content=message.content,
+            cleaned_text=cleaned_text,
+            tokens=tokens,
+        )
+
         created_at = message.created_at or datetime.now(timezone.utc)
         now = datetime.now(timezone.utc)
 
@@ -184,6 +194,9 @@ class DiscordCollector(discord.Client):
             "tokens": tokens,
             "event_type": event_type,
             "is_deleted": False,
+            "content_hash": content_hash,
+            "is_duplicate": False,
+            "quality_score": quality_score,
             "created_at": created_at,
             "updated_at": now,
             "deleted_at": None,

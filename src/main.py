@@ -46,6 +46,9 @@ def main() -> None:
     aggregate_parser.add_argument("--timezone", default=None, help="IANA timezone, e.g. Asia/Shanghai")
     sub.add_parser("scheduler")
     sub.add_parser("web")
+    digest_parser = sub.add_parser("digest", help="Generate daily digest")
+    digest_parser.add_argument("--timezone", default="Asia/Bangkok", help="IANA timezone")
+    sub.add_parser("migrate", help="Run database migrations via Alembic")
 
     args = parser.parse_args()
     config = load_config(args.config)
@@ -84,6 +87,23 @@ def main() -> None:
     if args.command == "web":
         run_web(config_path=args.config)
         return
+
+    if args.command == "digest":
+        aggregator = HourlyAggregator(db=db, config=config.get("aggregator", {}))
+        timezone_name = args.timezone or "Asia/Bangkok"
+        digest = aggregator.generate_daily_digest(timezone_name=timezone_name)
+        print(f"Daily digest generated for {digest.get('digest_date', 'unknown')}")
+        print(f"Summary: {digest.get('summary_cn', '')[:200]}...")
+        return
+
+    if args.command == "migrate":
+        import subprocess
+        import sys
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=str(__import__("pathlib").Path(__file__).parent.parent),
+        )
+        sys.exit(result.returncode)
 
 
 if __name__ == "__main__":

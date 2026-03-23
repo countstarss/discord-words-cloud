@@ -5,6 +5,7 @@ discord.py>=2.4.0
 # Database
 psycopg2-binary>=2.9.0
 SQLAlchemy>=2.0.25
+alembic>=1.13.0
 
 # NLP / ML
 pythainlp>=4.0.0
