@@ -1,0 +1,60 @@
+discord:
+  token: "${DISCORD_BOT_TOKEN:}"
+  shard_count: "${DISCORD_SHARD_COUNT:1}"
+
+database:
+  # 优先使用 DATABASE_URL；如为空则使用下方 host/port/name/user/password
+  url: "${DATABASE_URL:}"
+  host: "${DB_HOST:localhost}"
+  port: "${DB_PORT:5432}"
+  name: "${DB_NAME:discord_thai}"
+  user: "${DB_USER:postgres}"
+  password: "${DB_PASSWORD:}"
+
+targets:
+  # 支持两种写法：
+  # 1) YAML数组: [123, 456]
+  # 2) 环境变量字符串: "123,456"
+  guild_ids: "${TARGET_GUILD_IDS:}"
+  channel_ids: "${TARGET_CHANNEL_IDS:}"
+
+collector:
+  backfill:
+    # 启动后先回填历史，再继续实时监听。
+    enabled: "${BACKFILL_ENABLED:true}"
+    # 0 = 全量历史；>0 表示每个频道最多回填 N 条（默认 100）
+    limit_per_channel: "${BACKFILL_LIMIT_PER_CHANNEL:100}"
+    oldest_first: "${BACKFILL_OLDEST_FIRST:true}"
+
+processor:
+  language_threshold: "${LANGUAGE_THRESHOLD:0.2}"
+  tokenizer_engine: "${TOKENIZER_ENGINE:newmm}"
+  min_text_length: "${MIN_TEXT_LENGTH:2}"
+  min_token_length: "${MIN_TOKEN_LENGTH:1}"
+
+aggregator:
+  # 手动执行 aggregate --mode today 时使用的时区
+  analysis_timezone: "${ANALYSIS_TIMEZONE:Asia/Shanghai}"
+  window_hours: "${AGGREGATOR_WINDOW_HOURS:1}"
+  top_n: "${AGGREGATOR_TOP_N:50}"
+  min_frequency: "${AGGREGATOR_MIN_FREQUENCY:2}"
+  llm_enabled: "${LLM_ENABLED:false}"
+  llm_model: "${LLM_MODEL:gpt-4.1-mini}"
+  llm_max_chunks: "${LLM_MAX_CHUNKS:6}"
+  llm_chunk_chars: "${LLM_CHUNK_CHARS:3200}"
+  demand_patterns:
+    - "อยาก"
+    - "ต้องการ"
+    - "ช่วย"
+    - "ไม่ได้"
+    - "ปัญหา"
+    - "ผิด"
+    - "ไม่เข้าใจ"
+    - "แพง"
+    - "ช้า"
+    - "bug"
+    - "error"
+
+web:
+  host: "${WEB_HOST:0.0.0.0}"
+  port: "${WEB_PORT:8080}"
