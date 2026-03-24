@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from sqlalchemy import create_engine, delete, desc, func, inspect, select, text, update
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .models import (
     Base,
+    DailyReport,
     Message,
 )
 
@@ -156,6 +157,21 @@ class Database:
             stmt = stmt.order_by(Message.created_at.asc())
             return list(db.scalars(stmt))
 
+    def get_messages_for_window(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> List[Message]:
+        with self.session() as db:
+            stmt = (
+                select(Message)
+                .where(Message.is_deleted.is_(False))
+                .where(Message.created_at >= window_start)
+                .where(Message.created_at < window_end)
+                .order_by(Message.created_at.asc())
+            )
+            return list(db.scalars(stmt))
+
     def get_message_by_id(self, message_id: int) -> Optional[Message]:
         with self.session() as db:
             return db.get(Message, message_id)
@@ -186,6 +202,39 @@ class Database:
             stmt = select(func.count()).select_from(Message).where(Message.is_deleted.is_(False))
             if target_language_only:
                 stmt = stmt.where(Message.is_target_language.is_(True))
+            return int(db.scalar(stmt) or 0)
+
+    # MARK: - Daily Report CRUD
+    def upsert_daily_report(self, payload: Dict[str, Any]) -> DailyReport:
+        with self.session() as db:
+            stmt = select(DailyReport).where(DailyReport.report_date == payload["report_date"])
+            existing = db.scalar(stmt)
+            if existing is None:
+                existing = DailyReport(**payload)
+                db.add(existing)
+                db.flush()
+                return existing
+
+            for key, value in payload.items():
+                if key == "id":
+                    continue
+                setattr(existing, key, value)
+            db.flush()
+            return existing
+
+    def get_daily_report_by_date(self, report_date: date) -> Optional[DailyReport]:
+        with self.session() as db:
+            stmt = select(DailyReport).where(DailyReport.report_date == report_date)
+            return db.scalar(stmt)
+
+    def get_all_daily_reports(self) -> List[DailyReport]:
+        with self.session() as db:
+            stmt = select(DailyReport).order_by(desc(DailyReport.report_date))
+            return list(db.scalars(stmt))
+
+    def count_daily_reports(self) -> int:
+        with self.session() as db:
+            stmt = select(func.count()).select_from(DailyReport)
             return int(db.scalar(stmt) or 0)
 
     # MARK: - Stats

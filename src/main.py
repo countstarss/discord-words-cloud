@@ -10,10 +10,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Rubii Words Cloud")
     parser.add_argument(
         "command",
-        choices=["bot", "api", "init-db"],
-        help="Command to run: bot (Discord collector), api (API server), or init-db (initialize database)",
+        choices=["bot", "api", "init-db", "daily-report-worker", "daily-report-once"],
+        help="Command to run",
     )
     parser.add_argument("--config", default=None, help="Config file path")
+    parser.add_argument("--now", action="store_true", help="Generate report for today up to current time")
     args = parser.parse_args()
 
     if args.command == "bot":
@@ -43,6 +44,16 @@ def main() -> None:
         print(f"Initializing database: {name}")
         db = init_db(database_url=database_url)
         print("Database initialized successfully!")
+    elif args.command == "daily-report-worker":
+        from .reports import run_daily_report_worker
+
+        run_daily_report_worker(config_path=args.config)
+    elif args.command == "daily-report-once":
+        if not args.now:
+            parser.error("daily-report-once requires --now")
+        from .reports import run_daily_report_once_now
+
+        run_daily_report_once_now(config_path=args.config)
     else:
         parser.print_help()
         sys.exit(1)

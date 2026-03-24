@@ -22,8 +22,8 @@ targets:
 # Collector settings
 collector:
   backfill:
-    enabled: true
-    limit_per_channel: 100
+    enabled: false
+    limit_per_channel: 0
     oldest_first: false
 
 # Message processor settings

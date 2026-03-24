@@ -140,7 +140,7 @@ class DiscordCollector(discord.Client):
 
         collector_cfg = config.get("collector", {})
         backfill_cfg = collector_cfg.get("backfill", {})
-        self.backfill_enabled = self._to_bool(backfill_cfg.get("enabled", True))
+        self.backfill_enabled = self._to_bool(backfill_cfg.get("enabled", False))
         self.backfill_limit_per_channel = self._to_int(backfill_cfg.get("limit_per_channel", 0), default=0)
         self.backfill_oldest_first = self._to_bool(backfill_cfg.get("oldest_first", True))
         self._backfill_started = False
@@ -303,6 +303,9 @@ class DiscordCollector(discord.Client):
         print(f"Connected guilds: {len(self.guilds)}")
         print(f"Target guild IDs: {sorted(self.target_guilds) if self.target_guilds else 'ALL'}")
         print(f"Target channel IDs: {sorted(self.target_channels) if self.target_channels else 'ALL'}")
+        if self.target_channels is None:
+            print("[collector] no target channel configured; live collection is currently reading ALL visible channels")
+        print(f"[collector] backfill enabled={self.backfill_enabled} limit_per_channel={self.backfill_limit_per_channel}")
         if self.backfill_enabled and not self._backfill_started:
             self._backfill_started = True
             asyncio.create_task(self._run_backfill())

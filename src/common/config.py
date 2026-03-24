@@ -10,6 +10,10 @@ from dotenv import load_dotenv
 import yaml
 
 _ENV_PATTERN = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}$")
+_ENV_ALIASES = {
+    "DISCORD_GUILD_IDS": ("TARGET_GUILD_IDS",),
+    "DISCORD_CHANNEL_IDS": ("TARGET_CHANNEL_IDS",),
+}
 
 
 # MARK: - Resolver
@@ -72,10 +76,22 @@ def _resolve_value(value: Any) -> Any:
     return value
 
 
+def _apply_env_aliases() -> None:
+    for canonical_key, aliases in _ENV_ALIASES.items():
+        if os.getenv(canonical_key):
+            continue
+        for alias in aliases:
+            alias_value = os.getenv(alias)
+            if alias_value:
+                os.environ[canonical_key] = alias_value
+                break
+
+
 # MARK: - Main
 def load_config(config_path: Optional[str] = None) -> dict:
     project_root = Path(__file__).resolve().parents[2]
     load_dotenv(project_root / ".env", override=False)
+    _apply_env_aliases()
     default_path = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
     path = Path(config_path) if config_path else default_path
     with path.open("r", encoding="utf-8") as f:

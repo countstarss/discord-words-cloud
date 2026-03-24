@@ -7,7 +7,7 @@ from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, Query
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
 
 from ..common import load_config
 from ..storage import get_db, init_db
@@ -15,7 +15,588 @@ from ..storage import get_db, init_db
 app = FastAPI(title="Rubii Words Cloud", version="0.1.0")
 
 
+def _dashboard_html() -> str:
+    return """
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rubii Words Cloud Dashboard</title>
+    <style>
+      :root {
+        --bg: #f3f6fb;
+        --panel: rgba(255,255,255,0.84);
+        --panel-strong: rgba(255,255,255,0.96);
+        --text: #0e1726;
+        --muted: #5f6f84;
+        --line: rgba(15, 23, 42, 0.08);
+        --accent: #0ea5e9;
+        --accent-soft: rgba(14,165,233,0.12);
+        --success: #10b981;
+        --shadow: 0 20px 60px rgba(15, 23, 42, 0.08);
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "IBM Plex Sans", "SF Pro Display", "Segoe UI", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(14,165,233,0.18), transparent 30%),
+          radial-gradient(circle at top right, rgba(16,185,129,0.14), transparent 24%),
+          linear-gradient(180deg, #f8fbff 0%, #eef3fa 100%);
+      }
+
+      .shell {
+        max-width: 1380px;
+        margin: 0 auto;
+        padding: 28px;
+      }
+
+      .hero {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: 1.45fr 0.95fr;
+        margin-bottom: 22px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+
+      .hero-card {
+        padding: 28px;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .hero-card::after {
+        content: "";
+        position: absolute;
+        inset: auto -80px -100px auto;
+        width: 220px;
+        height: 220px;
+        background: radial-gradient(circle, rgba(14,165,233,0.18), transparent 70%);
+        pointer-events: none;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 12px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #0369a1;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 16px 0 10px;
+        font-size: clamp(34px, 4vw, 52px);
+        line-height: 0.95;
+        letter-spacing: -0.04em;
+      }
+
+      .subtle {
+        margin: 0;
+        max-width: 60ch;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        padding: 24px;
+      }
+
+      .status-item {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 18px;
+        background: var(--panel-strong);
+      }
+
+      .status-item span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 8px;
+      }
+
+      .status-item strong {
+        display: block;
+        font-size: 28px;
+        letter-spacing: -0.04em;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 0.84fr) minmax(0, 1.45fr);
+        gap: 22px;
+      }
+
+      .section {
+        padding: 22px;
+      }
+
+      .section-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+
+      .section-title h2 {
+        margin: 0;
+        font-size: 18px;
+        letter-spacing: -0.03em;
+      }
+
+      .section-title p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--panel-strong);
+        padding: 14px 16px;
+        font: inherit;
+        color: var(--text);
+        outline: none;
+      }
+
+      .mini-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      .mini-card {
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+      }
+
+      .mini-card label {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 6px;
+      }
+
+      .mini-card strong {
+        font-size: 18px;
+        letter-spacing: -0.03em;
+      }
+
+      .message-list {
+        display: grid;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .message-item {
+        padding: 14px 16px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+      }
+
+      .message-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+
+      .message-content {
+        font-size: 14px;
+        line-height: 1.6;
+        color: #1f2937;
+      }
+
+      .report-shell {
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.92));
+        min-height: 680px;
+        overflow: hidden;
+      }
+
+      .report-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(14,165,233,0.05);
+      }
+
+      .report-header strong {
+        display: block;
+        font-size: 20px;
+        letter-spacing: -0.03em;
+      }
+
+      .report-header span {
+        display: block;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .report-body {
+        padding: 22px 24px 28px;
+        overflow: auto;
+      }
+
+      .report-body h1,
+      .report-body h2,
+      .report-body h3 {
+        margin-top: 1.35em;
+        margin-bottom: 0.55em;
+        letter-spacing: -0.03em;
+      }
+
+      .report-body h1 { font-size: 30px; }
+      .report-body h2 { font-size: 22px; }
+      .report-body h3 { font-size: 17px; }
+      .report-body p { margin: 0 0 0.95em; line-height: 1.78; color: #1f2937; }
+      .report-body ul { margin: 0 0 1.1em 1.1em; padding: 0; color: #1f2937; }
+      .report-body li { margin-bottom: 0.5em; line-height: 1.75; }
+      .report-body code {
+        padding: 2px 6px;
+        border-radius: 8px;
+        background: rgba(14,165,233,0.08);
+        color: #0369a1;
+      }
+
+      .empty {
+        padding: 48px 24px;
+        text-align: center;
+        color: var(--muted);
+      }
+
+      .pulse {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--success);
+        font-weight: 700;
+      }
+
+      .pulse::before {
+        content: "";
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: currentColor;
+        box-shadow: 0 0 0 0 rgba(16,185,129,0.45);
+        animation: pulse 1.6s infinite;
+      }
+
+      @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(16,185,129,0.35); }
+        70% { box-shadow: 0 0 0 12px rgba(16,185,129,0); }
+        100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
+      }
+
+      @media (max-width: 1080px) {
+        .hero,
+        .layout {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 720px) {
+        .shell { padding: 16px; }
+        .status-grid,
+        .mini-grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <section class="hero">
+        <div class="panel hero-card">
+          <div class="eyebrow">Rubii Intelligence Monitor</div>
+          <h1>Tech Minimal Dashboard</h1>
+          <p class="subtle">
+            Observe collection volume, daily report production, recent live messages, and switch across generated daily reports without leaving FastAPI.
+          </p>
+        </div>
+        <div class="panel status-grid" id="statusGrid">
+          <div class="status-item"><span>Collected Messages</span><strong id="totalMessages">--</strong></div>
+          <div class="status-item"><span>Daily Reports</span><strong id="totalReports">--</strong></div>
+          <div class="status-item"><span>24h Active Users</span><strong id="activeUsers">--</strong></div>
+          <div class="status-item"><span>Latest Report</span><strong id="latestReport">--</strong></div>
+        </div>
+      </section>
+
+      <section class="layout">
+        <div class="panel section">
+          <div class="section-title">
+            <div>
+              <h2>Snapshot</h2>
+              <p>Operational counters and recent messages.</p>
+            </div>
+            <div class="pulse">Live</div>
+          </div>
+
+          <label for="reportDate" style="display:block;margin-bottom:8px;color:var(--muted);font-size:13px;">Switch Daily Report</label>
+          <select id="reportDate" class="select"></select>
+
+          <div class="mini-grid">
+            <div class="mini-card">
+              <label>Latest Message</label>
+              <strong id="latestMessageAt">--</strong>
+            </div>
+            <div class="mini-card">
+              <label>24h Target Ratio</label>
+              <strong id="targetRatio">--</strong>
+            </div>
+            <div class="mini-card">
+              <label>Current Report Messages</label>
+              <strong id="reportMessages">--</strong>
+            </div>
+            <div class="mini-card">
+              <label>Current Report Target</label>
+              <strong id="reportTargetMessages">--</strong>
+            </div>
+          </div>
+
+          <div class="message-list" id="messageList"></div>
+        </div>
+
+        <div class="panel section">
+          <div class="section-title">
+            <div>
+              <h2>Daily Report Viewer</h2>
+              <p id="reportMeta">Select a report date to inspect translated content.</p>
+            </div>
+          </div>
+
+          <div class="report-shell">
+            <div class="report-header">
+              <div>
+                <strong id="reportTitle">No report selected</strong>
+                <span id="reportWindow">--</span>
+              </div>
+              <div style="text-align:right">
+                <span>Source / Target</span>
+                <strong id="reportCounts">--</strong>
+              </div>
+            </div>
+            <article class="report-body" id="reportBody">
+              <div class="empty">Loading dashboard data...</div>
+            </article>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const state = { reports: [], messages: [], summary: null, selectedDate: null };
+
+      function escapeHtml(value) {
+        return value
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      }
+
+      function renderMarkdown(markdown) {
+        const lines = String(markdown || "").split(/\\r?\\n/);
+        const html = [];
+        let inList = false;
+
+        const closeList = () => {
+          if (inList) {
+            html.push("</ul>");
+            inList = false;
+          }
+        };
+
+        for (const rawLine of lines) {
+          const line = rawLine.trimEnd();
+          if (!line.trim()) {
+            closeList();
+            continue;
+          }
+
+          if (line.startsWith("### ")) {
+            closeList();
+            html.push(`<h3>${escapeHtml(line.slice(4))}</h3>`);
+            continue;
+          }
+          if (line.startsWith("## ")) {
+            closeList();
+            html.push(`<h2>${escapeHtml(line.slice(3))}</h2>`);
+            continue;
+          }
+          if (line.startsWith("# ")) {
+            closeList();
+            html.push(`<h1>${escapeHtml(line.slice(2))}</h1>`);
+            continue;
+          }
+          if (line.startsWith("- ")) {
+            if (!inList) {
+              html.push("<ul>");
+              inList = true;
+            }
+            html.push(`<li>${escapeHtml(line.slice(2))}</li>`);
+            continue;
+          }
+
+          closeList();
+          html.push(`<p>${escapeHtml(line)}</p>`);
+        }
+        closeList();
+        return html.join("");
+      }
+
+      function formatDateTime(value) {
+        if (!value) return "--";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return value;
+        return new Intl.DateTimeFormat(undefined, {
+          year: "numeric",
+          month: "short",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        }).format(date);
+      }
+
+      function renderMessages(messages) {
+        const root = document.getElementById("messageList");
+        if (!messages.length) {
+          root.innerHTML = '<div class="message-item"><div class="message-content">No recent messages yet.</div></div>';
+          return;
+        }
+        root.innerHTML = messages.map((message) => `
+          <div class="message-item">
+            <div class="message-meta">
+              <span>channel ${message.channel_id}</span>
+              <span>${formatDateTime(message.created_at)}</span>
+            </div>
+            <div class="message-content">${escapeHtml((message.content || "").slice(0, 180))}</div>
+          </div>
+        `).join("");
+      }
+
+      function renderSummary(summary) {
+        document.getElementById("totalMessages").textContent = summary.total_messages.toLocaleString();
+        document.getElementById("totalReports").textContent = summary.total_reports.toLocaleString();
+        document.getElementById("activeUsers").textContent = summary.active_users_24h.toLocaleString();
+        document.getElementById("latestReport").textContent = summary.latest_report_date || "--";
+        document.getElementById("latestMessageAt").textContent = formatDateTime(summary.latest_message_at);
+        document.getElementById("targetRatio").textContent = `${summary.target_language_ratio_24h.toFixed(1)}%`;
+      }
+
+      function syncReportSelector() {
+        const select = document.getElementById("reportDate");
+        if (!state.reports.length) {
+          select.innerHTML = '<option value="">No reports</option>';
+          return;
+        }
+        if (!state.selectedDate) {
+          state.selectedDate = state.reports[0].report_date;
+        }
+        select.innerHTML = state.reports
+          .map((report) => `<option value="${report.report_date}" ${report.report_date === state.selectedDate ? "selected" : ""}>${report.report_date}</option>`)
+          .join("");
+      }
+
+      function renderSelectedReport() {
+        const report = state.reports.find((item) => item.report_date === state.selectedDate);
+        const body = document.getElementById("reportBody");
+        if (!report) {
+          document.getElementById("reportTitle").textContent = "No report selected";
+          document.getElementById("reportWindow").textContent = "--";
+          document.getElementById("reportCounts").textContent = "--";
+          document.getElementById("reportMessages").textContent = "--";
+          document.getElementById("reportTargetMessages").textContent = "--";
+          document.getElementById("reportMeta").textContent = "No daily report found for the selected date.";
+          body.innerHTML = '<div class="empty">No report available.</div>';
+          return;
+        }
+
+        document.getElementById("reportTitle").textContent = `Daily Report · ${report.report_date}`;
+        document.getElementById("reportWindow").textContent = `${formatDateTime(report.window_start)} → ${formatDateTime(report.window_end)}`;
+        document.getElementById("reportCounts").textContent = `${report.source_message_count} / ${report.target_message_count}`;
+        document.getElementById("reportMessages").textContent = report.source_message_count.toLocaleString();
+        document.getElementById("reportTargetMessages").textContent = report.target_message_count.toLocaleString();
+        document.getElementById("reportMeta").textContent = `Generated ${formatDateTime(report.generated_at)} · Timezone ${report.timezone}`;
+        body.innerHTML = renderMarkdown(report.content_cn);
+      }
+
+      async function loadDashboard() {
+        const [summaryRes, reportRes, messageRes] = await Promise.all([
+          fetch("/api/dashboard"),
+          fetch("/daily-report"),
+          fetch("/api/messages?limit=8"),
+        ]);
+
+        const summary = await summaryRes.json();
+        const reportPayload = await reportRes.json();
+        const messagePayload = await messageRes.json();
+
+        state.summary = summary;
+        state.reports = reportPayload.reports || [];
+        state.messages = messagePayload.messages || [];
+
+        renderSummary(summary);
+        renderMessages(state.messages);
+        syncReportSelector();
+        renderSelectedReport();
+      }
+
+      document.getElementById("reportDate").addEventListener("change", (event) => {
+        state.selectedDate = event.target.value;
+        renderSelectedReport();
+      });
+
+      loadDashboard().catch((error) => {
+        console.error(error);
+        document.getElementById("reportBody").innerHTML = '<div class="empty">Failed to load dashboard data.</div>';
+      });
+    </script>
+  </body>
+</html>
+"""
+
+
 # MARK: - Health & Status APIs
+@app.get("/", response_class=HTMLResponse)
+def dashboard() -> str:
+    return _dashboard_html()
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -99,6 +680,43 @@ def get_stats(
         stats["target_language_only"] = True
     
     return stats
+
+
+@app.get("/api/dashboard")
+def get_dashboard() -> dict:
+    db = get_db()
+    stats = db.get_stats(hours=24)
+    reports = db.get_all_daily_reports()
+    latest_report = reports[0] if reports else None
+    return {
+        "total_messages": db.count_messages(),
+        "total_reports": len(reports),
+        "active_users_24h": stats.get("active_users", 0),
+        "target_language_ratio_24h": stats.get("target_language_ratio", 0.0),
+        "latest_message_at": stats.get("last_message_at"),
+        "latest_report_date": latest_report.report_date.isoformat() if latest_report else None,
+    }
+
+
+@app.get("/daily-report")
+def get_daily_reports() -> dict:
+    db = get_db()
+    reports = db.get_all_daily_reports()
+    return {
+        "reports": [
+            {
+                "report_date": report.report_date.isoformat(),
+                "timezone": report.timezone,
+                "window_start": report.window_start.isoformat(),
+                "window_end": report.window_end.isoformat(),
+                "generated_at": report.generated_at.isoformat(),
+                "source_message_count": report.source_message_count,
+                "target_message_count": report.target_message_count,
+                "content_cn": report.content_cn,
+            }
+            for report in reports
+        ]
+    }
 
 
 # MARK: - Web Runtime

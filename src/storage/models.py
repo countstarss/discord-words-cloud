@@ -1,12 +1,13 @@
 # Storage models
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     Index,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -59,3 +61,28 @@ class Message(Base):
 
 # MARK: - Indexes
 Index("idx_messages_dedup", Message.content_hash, Message.is_duplicate)
+
+
+# MARK: - Daily Report Domain
+class DailyReport(Base):
+    __tablename__ = "daily_reports"
+    __table_args__ = (
+        UniqueConstraint("report_date", name="uq_daily_reports_report_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Shanghai")
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_cn: Mapped[str] = mapped_column(Text, nullable=False)
+    source_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    target_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

@@ -18,7 +18,7 @@ cp .env.example .env
 # Edit .env with your configuration
 
 # Create virtual environment
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
@@ -51,7 +51,7 @@ targets:
 
 **Option A - Quick init (creates all tables):**
 ```bash
-python -m src.main init-db
+python3 -m src.main init-db
 ```
 
 **Option B - Using Alembic (recommended for migrations):**
@@ -67,16 +67,28 @@ alembic upgrade head
 
 **Start API server:**
 ```bash
-python -m src.main api
+python3 -m src.main api
 # or
-python -m src.api.app
+python3 -m src.api.app
 ```
+
+Open the dashboard at [http://127.0.0.1:8080/](http://127.0.0.1:8080/).
 
 **Start Discord bot:**
 ```bash
-python -m src.main bot
+python3 -m src.main bot
 # or
-python -m src.collector.bot
+python3 -m src.collector.bot
+```
+
+**Start daily report worker:**
+```bash
+python3 -m src.main daily-report-worker
+```
+
+**Generate today's report up to now:**
+```bash
+python3 -m src.main daily-report-once --now
 ```
 
 ## API Endpoints
@@ -88,6 +100,9 @@ python -m src.collector.bot
 | `GET /api/messages` | List messages |
 | `GET /api/messages/{id}` | Get single message |
 | `GET /api/stats` | Get detailed stats |
+| `GET /api/dashboard` | Dashboard summary |
+| `GET /daily-report` | List all daily reports |
+| `GET /` | Dashboard web UI |
 
 ## Configuration
 
