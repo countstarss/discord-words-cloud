@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import os
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, Iterator, List, Optional
+
+from sqlalchemy import create_engine, delete, desc, func, inspect, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session, sessionmaker
+
+from .models import (
+    Base,
+    Message,
+)
+
+
+# MARK: - Config
+def _database_url_from_env() -> str:
+    raw_url = os.getenv("DATABASE_URL")
+    if raw_url:
+        return raw_url
+
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    name = os.getenv("DB_NAME", "rubii_words")
+    user = os.getenv("DB_USER", "postgres")
+    password = os.getenv("DB_PASSWORD", "postgres")
+    return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
+
+
+# MARK: - Database Gateway
+class Database:
+    def __init__(self, database_url: Optional[str] = None):
+        self.database_url = database_url or _database_url_from_env()
+        self.engine = create_engine(
+            self.database_url,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            future=True,
+        )
+        self._session_factory = sessionmaker(
+            bind=self.engine,
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+            future=True,
+        )
+
+    # MARK: - Session
+    def init_tables(self) -> None:
+        Base.metadata.create_all(self.engine)
+        self._ensure_schema_compatibility()
+
+    def _ensure_schema_compatibility(self) -> None:
+        inspector = inspect(self.engine)
+        table_names = set(inspector.get_table_names())
+        if "messages" not in table_names:
+            return
+
+        existing_columns = {column["name"] for column in inspector.get_columns("messages")}
+        existing_indexes = {index["name"] for index in inspector.get_indexes("messages")}
+
+        alter_statements: list[str] = []
+        if "content_hash" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN content_hash VARCHAR(64)")
+        if "is_duplicate" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN is_duplicate BOOLEAN NOT NULL DEFAULT FALSE")
+        if "quality_score" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN quality_score DOUBLE PRECISION NOT NULL DEFAULT 1.0")
+
+        index_statements: list[str] = []
+        if "content_hash" in existing_columns or any("content_hash" in stmt for stmt in alter_statements):
+            if "ix_messages_content_hash" not in existing_indexes:
+                index_statements.append("CREATE INDEX IF NOT EXISTS ix_messages_content_hash ON messages (content_hash)")
+        if "is_duplicate" in existing_columns or any("is_duplicate" in stmt for stmt in alter_statements):
+            if "ix_messages_is_duplicate" not in existing_indexes:
+                index_statements.append("CREATE INDEX IF NOT EXISTS ix_messages_is_duplicate ON messages (is_duplicate)")
+        if {"content_hash", "is_duplicate"}.issubset(existing_columns) or (
+            any("content_hash" in stmt for stmt in alter_statements)
+            and any("is_duplicate" in stmt for stmt in alter_statements)
+        ):
+            if "idx_messages_dedup" not in existing_indexes:
+                index_statements.append(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_dedup ON messages (content_hash, is_duplicate)"
+                )
+
+        if not alter_statements and not index_statements:
+            return
+
+        with self.engine.begin() as conn:
+            for statement in alter_statements:
+                conn.execute(text(statement))
+            for statement in index_statements:
+                conn.execute(text(statement))
+
+    @contextmanager
+    def session(self) -> Iterator[Session]:
+        db = self._session_factory()
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    # MARK: - Message CRUD
+    def upsert_message(self, payload: Dict[str, Any]) -> bool:
+        with self.session() as db:
+            existing = db.get(Message, payload["message_id"])
+            if existing is None:
+                db.add(Message(**payload))
+                return True
+
+            for key, value in payload.items():
+                if key == "message_id":
+                    continue
+                setattr(existing, key, value)
+            return False
+
+    def mark_deleted(self, message_id: int, deleted_at: Optional[datetime] = None) -> None:
+        deleted_at = deleted_at or datetime.now(timezone.utc)
+        with self.session() as db:
+            msg = db.get(Message, message_id)
+            if msg is None:
+                return
+            msg.is_deleted = True
+            msg.event_type = "delete"
+            msg.deleted_at = deleted_at
+            msg.updated_at = deleted_at
+
+    # MARK: - Message Query
+    def get_messages(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        exclude_duplicates: bool = False,
+        min_quality: float = 0.0,
+        target_language_only: bool = False,
+    ) -> List[Message]:
+        with self.session() as db:
+            stmt = (
+                select(Message)
+                .where(Message.is_deleted.is_(False))
+                .where(Message.created_at >= window_start)
+                .where(Message.created_at < window_end)
+            )
+            if target_language_only:
+                stmt = stmt.where(Message.is_target_language.is_(True))
+            if exclude_duplicates:
+                stmt = stmt.where(Message.is_duplicate.is_(False))
+            if min_quality > 0:
+                stmt = stmt.where(Message.quality_score >= min_quality)
+            stmt = stmt.order_by(Message.created_at.asc())
+            return list(db.scalars(stmt))
+
+    def get_message_by_id(self, message_id: int) -> Optional[Message]:
+        with self.session() as db:
+            return db.get(Message, message_id)
+
+    def get_all_messages(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        target_language_only: bool = False,
+    ) -> List[Message]:
+        with self.session() as db:
+            stmt = (
+                select(Message)
+                .where(Message.is_deleted.is_(False))
+                .order_by(desc(Message.created_at))
+                .limit(limit)
+                .offset(offset)
+            )
+            if target_language_only:
+                stmt = stmt.where(Message.is_target_language.is_(True))
+            return list(db.scalars(stmt))
+
+    def count_messages(
+        self,
+        target_language_only: bool = False,
+    ) -> int:
+        with self.session() as db:
+            stmt = select(func.count()).select_from(Message).where(Message.is_deleted.is_(False))
+            if target_language_only:
+                stmt = stmt.where(Message.is_target_language.is_(True))
+            return int(db.scalar(stmt) or 0)
+
+    # MARK: - Stats
+    def get_stats(self, hours: int = 24) -> Dict[str, Any]:
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        with self.session() as db:
+            total = db.scalar(
+                select(func.count()).select_from(Message)
+                .where(Message.created_at >= cutoff)
+            ) or 0
+            target_lang = db.scalar(
+                select(func.count()).select_from(Message)
+                .where(Message.created_at >= cutoff, Message.is_target_language.is_(True))
+            ) or 0
+            deleted = db.scalar(
+                select(func.count()).select_from(Message)
+                .where(Message.created_at >= cutoff, Message.is_deleted.is_(True))
+            ) or 0
+            active_users = db.scalar(
+                select(func.count(func.distinct(Message.author_id)))
+                .where(Message.created_at >= cutoff)
+                .where(Message.is_deleted.is_(False))
+            ) or 0
+            last_message = db.scalar(select(func.max(Message.created_at)))
+
+        return {
+            "hours": hours,
+            "total_messages": int(total),
+            "target_language_messages": int(target_lang),
+            "deleted_messages": int(deleted),
+            "active_users": int(active_users),
+            "target_language_ratio": float((target_lang / total) * 100) if total else 0.0,
+            "last_message_at": last_message.isoformat() if last_message else None,
+        }
+
+
+# MARK: - Singleton Helpers
+_db_singleton: Optional[Database] = None
+
+
+def get_db(database_url: Optional[str] = None) -> Database:
+    global _db_singleton
+    if _db_singleton is None:
+        _db_singleton = Database(database_url=database_url)
+    return _db_singleton
+
+
+def init_db(database_url: Optional[str] = None) -> Database:
+    db = get_db(database_url=database_url)
+    db.init_tables()
+    return db
+
+
+@contextmanager
+def get_session() -> Iterator[Session]:
+    db = get_db()
+    with db.session() as session:
+        yield session

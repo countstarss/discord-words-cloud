@@ -1,0 +1,42 @@
+# Database configuration
+database:
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:5432}
+  name: ${DB_NAME:rubii_words}
+  user: ${DB_USER:postgres}
+  password: ${DB_PASSWORD:postgres}
+  # Or use full URL:
+  # url: ${DATABASE_URL:postgresql+psycopg2://user:password@host:port/dbname}
+
+# Discord bot configuration
+discord:
+  token: ${DISCORD_BOT_TOKEN:}
+
+# Collection targets
+targets:
+  # Discord server IDs to collect from (leave empty for all)
+  guild_ids: ${DISCORD_GUILD_IDS:}
+  # Specific channel IDs to collect from (leave empty for all)
+  channel_ids: ${DISCORD_CHANNEL_IDS:}
+
+# Collector settings
+collector:
+  backfill:
+    enabled: true
+    limit_per_channel: 100
+    oldest_first: false
+
+# Message processor settings
+processor:
+  # Target language to detect (th = Thai, can be any language code)
+  target_language: th
+  language_threshold: 0.2
+  min_text_length: 1
+  remove_urls: true
+  remove_mentions: true
+  collapse_repeats: true
+
+# API server settings
+web:
+  host: 0.0.0.0
+  port: 8080
