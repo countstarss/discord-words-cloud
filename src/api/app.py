@@ -38,9 +38,12 @@ def _dashboard_html() -> str:
       }
 
       * { box-sizing: border-box; }
+      html, body {
+        height: 100%;
+        overflow: hidden;
+      }
       body {
         margin: 0;
-        min-height: 100vh;
         font-family: "IBM Plex Sans", "SF Pro Display", "Segoe UI", sans-serif;
         color: var(--text);
         background:
@@ -52,14 +55,18 @@ def _dashboard_html() -> str:
       .shell {
         max-width: 1380px;
         margin: 0 auto;
-        padding: 28px;
+        height: 100vh;
+        padding: 18px 22px;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 16px;
+        overflow: hidden;
       }
 
       .hero {
         display: grid;
-        gap: 18px;
+        gap: 14px;
         grid-template-columns: 1.45fr 0.95fr;
-        margin-bottom: 22px;
       }
 
       .panel {
@@ -68,10 +75,11 @@ def _dashboard_html() -> str:
         border-radius: 24px;
         box-shadow: var(--shadow);
         backdrop-filter: blur(18px);
+        min-height: 0;
       }
 
       .hero-card {
-        padding: 28px;
+        padding: 20px 24px;
         position: relative;
         overflow: hidden;
       }
@@ -101,8 +109,8 @@ def _dashboard_html() -> str:
       }
 
       h1 {
-        margin: 16px 0 10px;
-        font-size: clamp(34px, 4vw, 52px);
+        margin: 12px 0 8px;
+        font-size: clamp(28px, 3.8vw, 46px);
         line-height: 0.95;
         letter-spacing: -0.04em;
       }
@@ -111,20 +119,21 @@ def _dashboard_html() -> str:
         margin: 0;
         max-width: 60ch;
         color: var(--muted);
-        line-height: 1.7;
+        line-height: 1.6;
+        font-size: 14px;
       }
 
       .status-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 16px;
-        padding: 24px;
+        gap: 12px;
+        padding: 16px;
       }
 
       .status-item {
         border: 1px solid var(--line);
         border-radius: 18px;
-        padding: 18px;
+        padding: 14px 16px;
         background: var(--panel-strong);
       }
 
@@ -146,11 +155,15 @@ def _dashboard_html() -> str:
       .layout {
         display: grid;
         grid-template-columns: minmax(0, 0.84fr) minmax(0, 1.45fr);
-        gap: 22px;
+        gap: 18px;
+        min-height: 0;
       }
 
       .section {
-        padding: 22px;
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
       }
 
       .section-title {
@@ -158,7 +171,7 @@ def _dashboard_html() -> str:
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        margin-bottom: 16px;
+        margin-bottom: 12px;
       }
 
       .section-title h2 {
@@ -178,7 +191,7 @@ def _dashboard_html() -> str:
         border: 1px solid var(--line);
         border-radius: 16px;
         background: var(--panel-strong);
-        padding: 14px 16px;
+        padding: 12px 14px;
         font: inherit;
         color: var(--text);
         outline: none;
@@ -188,11 +201,11 @@ def _dashboard_html() -> str:
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 12px;
-        margin-top: 16px;
+        margin-top: 14px;
       }
 
       .mini-card {
-        padding: 16px;
+        padding: 14px 16px;
         border-radius: 18px;
         border: 1px solid var(--line);
         background: var(--panel-strong);
@@ -210,40 +223,44 @@ def _dashboard_html() -> str:
         letter-spacing: -0.03em;
       }
 
-      .message-list {
-        display: grid;
-        gap: 10px;
-        margin-top: 16px;
-      }
-
-      .message-item {
+      .snapshot-note {
+        margin-top: 14px;
         padding: 14px 16px;
-        border-radius: 16px;
+        border-radius: 18px;
         border: 1px solid var(--line);
-        background: var(--panel-strong);
+        background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(243,247,252,0.94));
       }
 
-      .message-meta {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
+      .snapshot-note span {
+        display: block;
         color: var(--muted);
         font-size: 12px;
-        margin-bottom: 8px;
+        margin-bottom: 6px;
       }
 
-      .message-content {
-        font-size: 14px;
-        line-height: 1.6;
+      .snapshot-note strong {
+        display: block;
+        font-size: 16px;
+        letter-spacing: -0.03em;
+        margin-bottom: 4px;
+      }
+
+      .snapshot-note p {
+        margin: 0;
         color: #1f2937;
+        font-size: 13px;
+        line-height: 1.6;
       }
 
       .report-shell {
         border: 1px solid var(--line);
         border-radius: 20px;
         background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.92));
-        min-height: 680px;
+        flex: 1;
+        min-height: 0;
         overflow: hidden;
+        display: flex;
+        flex-direction: column;
       }
 
       .report-header {
@@ -268,7 +285,9 @@ def _dashboard_html() -> str:
       }
 
       .report-body {
-        padding: 22px 24px 28px;
+        padding: 20px 24px 26px;
+        flex: 1;
+        min-height: 0;
         overflow: auto;
       }
 
@@ -328,6 +347,16 @@ def _dashboard_html() -> str:
         .layout {
           grid-template-columns: 1fr;
         }
+
+        html, body {
+          overflow: auto;
+        }
+
+        .shell {
+          height: auto;
+          min-height: 100vh;
+          overflow: visible;
+        }
       }
 
       @media (max-width: 720px) {
@@ -344,7 +373,7 @@ def _dashboard_html() -> str:
           <div class="eyebrow">Rubii Intelligence Monitor</div>
           <h1>Tech Minimal Dashboard</h1>
           <p class="subtle">
-            Observe collection volume, daily report production, recent live messages, and switch across generated daily reports without leaving FastAPI.
+            Observe collection volume, daily report production, and switch across generated daily reports without leaving FastAPI.
           </p>
         </div>
         <div class="panel status-grid" id="statusGrid">
@@ -360,7 +389,7 @@ def _dashboard_html() -> str:
           <div class="section-title">
             <div>
               <h2>Snapshot</h2>
-              <p>Operational counters and recent messages.</p>
+              <p>Operational counters and report context.</p>
             </div>
             <div class="pulse">Live</div>
           </div>
@@ -387,17 +416,16 @@ def _dashboard_html() -> str:
             </div>
           </div>
 
-          <div class="message-list" id="messageList"></div>
+          <div class="snapshot-note">
+            <span>Report Focus</span>
+            <strong>High-signal monitoring only</strong>
+            <p>
+              The dashboard hides raw message previews here and keeps the page focused on collection volume, report counts, and the selected daily report.
+            </p>
+          </div>
         </div>
 
         <div class="panel section">
-          <div class="section-title">
-            <div>
-              <h2>Daily Report Viewer</h2>
-              <p id="reportMeta">Select a report date to inspect translated content.</p>
-            </div>
-          </div>
-
           <div class="report-shell">
             <div class="report-header">
               <div>
@@ -418,7 +446,7 @@ def _dashboard_html() -> str:
     </div>
 
     <script>
-      const state = { reports: [], messages: [], summary: null, selectedDate: null };
+      const state = { reports: [], summary: null, selectedDate: null };
 
       function escapeHtml(value) {
         return value
@@ -492,23 +520,6 @@ def _dashboard_html() -> str:
         }).format(date);
       }
 
-      function renderMessages(messages) {
-        const root = document.getElementById("messageList");
-        if (!messages.length) {
-          root.innerHTML = '<div class="message-item"><div class="message-content">No recent messages yet.</div></div>';
-          return;
-        }
-        root.innerHTML = messages.map((message) => `
-          <div class="message-item">
-            <div class="message-meta">
-              <span>channel ${message.channel_id}</span>
-              <span>${formatDateTime(message.created_at)}</span>
-            </div>
-            <div class="message-content">${escapeHtml((message.content || "").slice(0, 180))}</div>
-          </div>
-        `).join("");
-      }
-
       function renderSummary(summary) {
         document.getElementById("totalMessages").textContent = summary.total_messages.toLocaleString();
         document.getElementById("totalReports").textContent = summary.total_reports.toLocaleString();
@@ -541,7 +552,6 @@ def _dashboard_html() -> str:
           document.getElementById("reportCounts").textContent = "--";
           document.getElementById("reportMessages").textContent = "--";
           document.getElementById("reportTargetMessages").textContent = "--";
-          document.getElementById("reportMeta").textContent = "No daily report found for the selected date.";
           body.innerHTML = '<div class="empty">No report available.</div>';
           return;
         }
@@ -551,27 +561,22 @@ def _dashboard_html() -> str:
         document.getElementById("reportCounts").textContent = `${report.source_message_count} / ${report.target_message_count}`;
         document.getElementById("reportMessages").textContent = report.source_message_count.toLocaleString();
         document.getElementById("reportTargetMessages").textContent = report.target_message_count.toLocaleString();
-        document.getElementById("reportMeta").textContent = `Generated ${formatDateTime(report.generated_at)} · Timezone ${report.timezone}`;
         body.innerHTML = renderMarkdown(report.content_cn);
       }
 
       async function loadDashboard() {
-        const [summaryRes, reportRes, messageRes] = await Promise.all([
+        const [summaryRes, reportRes] = await Promise.all([
           fetch("/api/dashboard"),
           fetch("/daily-report"),
-          fetch("/api/messages?limit=8"),
         ]);
 
         const summary = await summaryRes.json();
         const reportPayload = await reportRes.json();
-        const messagePayload = await messageRes.json();
 
         state.summary = summary;
         state.reports = reportPayload.reports || [];
-        state.messages = messagePayload.messages || [];
 
         renderSummary(summary);
-        renderMessages(state.messages);
         syncReportSelector();
         renderSelectedReport();
       }
