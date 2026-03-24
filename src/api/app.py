@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import uvicorn
@@ -693,9 +693,11 @@ def get_dashboard() -> dict:
     stats = db.get_stats(hours=24)
     reports = db.get_all_daily_reports()
     latest_report = reports[0] if reports else None
+    hourly_count_today = db.count_hourly_reports(date.today())
     return {
         "total_messages": db.count_messages(),
         "total_reports": len(reports),
+        "total_hourly_reports_today": hourly_count_today,
         "active_users_24h": stats.get("active_users", 0),
         "target_language_ratio_24h": stats.get("target_language_ratio", 0.0),
         "latest_message_at": stats.get("last_message_at"),

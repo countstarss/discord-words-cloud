@@ -85,6 +85,9 @@ python3 -m src.collector.bot
 ```bash
 python3 -m src.main daily-report-worker
 ```
+This worker now:
+- builds one `hourly_reports` record every 2 hours at `HH:05` Asia/Shanghai
+- merges the previous day's 12 interval reports into one daily report at `00:20` Asia/Shanghai
 
 **Generate today's report up to now:**
 ```bash

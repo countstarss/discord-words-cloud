@@ -17,10 +17,11 @@ def test_config_import():
 def test_storage_import():
     """Test that storage modules can be imported."""
     from src.storage import Database, get_db, init_db
-    from src.storage.models import Base, DailyReport, Message
+    from src.storage.models import Base, DailyReport, HourlyReport, Message
     assert Database is not None
     assert Message is not None
     assert DailyReport is not None
+    assert HourlyReport is not None
 
 
 def test_collector_import():

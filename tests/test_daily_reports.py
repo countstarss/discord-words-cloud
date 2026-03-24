@@ -3,16 +3,48 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
-import pandas as pd
-
-from src.pipeline import run_pipeline_from_dataframe
-from src.reports.service import DailyReportService, SHANGHAI_TZ
+from src.pipeline import build_interval_pipeline_bundle_from_dataframe
+from src.reports.service import DailyReportService, SHANGHAI_TZ, render_daily_markdown
 from src.storage import Database
 
 
 class FakeTranslator:
-    def translate_markdown_to_chinese(self, markdown: str) -> str:
-        return f"# 中文版\n\n{markdown}"
+    def summarize_signal_shard(self, shard: dict) -> dict:
+        urgent_issues = []
+        product_opportunities = []
+        general_feedback = []
+        for item in shard["items"]:
+            content = item["content"]
+            hints = set(item.get("hint_categories", []))
+            entry = {
+                "key": item["candidate_id"].replace("-", "_"),
+                "category": next(iter(hints), "other"),
+                "priority": "medium",
+                "title": content[:18],
+                "summary": f"围绕“{content[:12]}”形成了集中讨论。",
+                "message_count": item["message_count"],
+                "unique_user_count": item["unique_user_count"],
+                "channel_ids": [item["channel_id"]],
+                "evidence": [content[:40]],
+                "action_hint": "复核对应功能链路。",
+            }
+            if {"bug_report", "update_issue", "performance", "ai_quality"} & hints:
+                entry["priority"] = "high"
+                urgent_issues.append(entry)
+            elif {"feature_request", "ux_confusion"} & hints or item.get("question"):
+                product_opportunities.append(entry)
+            else:
+                general_feedback.append(entry)
+
+        return {
+            "urgent_issues": urgent_issues[:8],
+            "product_opportunities": product_opportunities[:6],
+            "general_feedback": general_feedback[:4],
+            "sentiment": {"score": "negative" if urgent_issues else "neutral", "reason": "测试桩输出"},
+        }
+
+    def compose_daily_markdown(self, summary: dict) -> str:
+        return render_daily_markdown(summary)
 
 
 def _make_db(tmp_path) -> Database:
@@ -22,11 +54,18 @@ def _make_db(tmp_path) -> Database:
     return db
 
 
-def _message_payload(message_id: int, content: str, created_at: datetime, is_target_language: bool) -> dict:
+def _message_payload(
+    message_id: int,
+    content: str,
+    created_at: datetime,
+    is_target_language: bool,
+    *,
+    channel_id: int = 10,
+) -> dict:
     return {
         "message_id": message_id,
         "guild_id": 1,
-        "channel_id": 10,
+        "channel_id": channel_id,
         "author_id": 100 + message_id,
         "content": content,
         "is_target_language": is_target_language,
@@ -45,122 +84,154 @@ def _message_payload(message_id: int, content: str, created_at: datetime, is_tar
     }
 
 
-def test_daily_report_upsert_is_idempotent(tmp_path):
+def test_hourly_report_upsert_is_idempotent(tmp_path):
     db = _make_db(tmp_path)
     payload = {
         "report_date": date(2026, 3, 24),
         "timezone": "Asia/Shanghai",
         "window_start": datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
-        "window_end": datetime(2026, 3, 24, 16, 0, tzinfo=timezone.utc),
-        "content": "# thai",
-        "content_cn": "# chinese",
+        "window_end": datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+        "content_json": {"urgent_issues": []},
         "source_message_count": 10,
         "target_message_count": 7,
-        "generated_at": datetime(2026, 3, 24, 16, 1, tzinfo=timezone.utc),
-        "updated_at": datetime(2026, 3, 24, 16, 1, tzinfo=timezone.utc),
+        "candidate_message_count": 6,
+        "shard_count": 1,
+        "generated_at": datetime(2026, 3, 23, 18, 1, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 3, 23, 18, 1, tzinfo=timezone.utc),
     }
 
-    first = db.upsert_daily_report(payload)
-    payload["content_cn"] = "# chinese updated"
-    second = db.upsert_daily_report(payload)
+    first = db.upsert_hourly_report(payload)
+    payload["candidate_message_count"] = 8
+    second = db.upsert_hourly_report(payload)
 
-    reports = db.get_all_daily_reports()
+    reports = db.get_hourly_reports_for_date(date(2026, 3, 24))
     assert first.id == second.id
     assert len(reports) == 1
-    assert reports[0].content_cn == "# chinese updated"
+    assert reports[0].candidate_message_count == 8
 
 
-def test_pipeline_counts_all_messages_but_clusters_only_target_language():
+def test_pipeline_filters_noise_and_shards_payload():
+    import pandas as pd
+
     df = pd.DataFrame(
         [
             {
                 "author_id": "1",
-                "content": "แอปล่ม เปิดไม่ได้เลย",
-                "created_at": "2026-03-24T01:00:00Z",
+                "channel_id": "10",
+                "content": "55",
+                "created_at": "2026-03-24T00:01:00Z",
                 "is_target_language": True,
                 "quality_score": 1.0,
             },
             {
                 "author_id": "2",
-                "content": "general english chat",
-                "created_at": "2026-03-24T02:00:00Z",
-                "is_target_language": False,
-                "quality_score": 1.0,
-            },
-        ]
-    )
-
-    result = run_pipeline_from_dataframe(
-        df=df,
-        report_date="2026-03-24",
-        timezone_name="Asia/Shanghai",
-        window_start=datetime(2026, 3, 24, 0, 0, tzinfo=timezone.utc),
-        window_end=datetime(2026, 3, 24, 23, 59, tzinfo=timezone.utc),
-    )
-
-    report = result["report"]
-    assert report["source_message_count"] == 2
-    assert report["target_message_count"] == 1
-    assert report["total_clusters"] >= 1
-    assert "รายงานประจำวัน" in result["markdown"]
-
-
-def test_pipeline_filters_longform_story_text_from_report():
-    df = pd.DataFrame(
-        [
-            {
-                "author_id": "1",
-                "content": '"มารีน่า" นักศึกษาคณะวิทยาศาสตร์ทางทะเลปี 2 ผู้มีนิสัยลุยๆ ปากแจ๋วแต่ลึกๆ แอบขี้กลัว '
-                'นึกคึกอยากลองดีท้าพิสูจน์ตำนาน Bloody Mary หลังเลิกเรียนที่มหาลัยในโลกที่ทุกคนต่างมีความลับ '
-                'เนื้อเรื่องนี้เริ่มจากเพื่อนสนิทในโรงเรียนที่ต้องเผชิญชะตากรรมร่วมกันและค่อยๆ เปิดเผยปมในอดีต',
-                "created_at": "2026-03-24T01:00:00Z",
+                "channel_id": "10",
+                "content": "อัปเดตแล้วเปิดไม่ได้ ต้องลงใหม่ทุกครั้ง",
+                "created_at": "2026-03-24T00:02:00Z",
                 "is_target_language": True,
                 "quality_score": 1.0,
             },
             {
-                "author_id": "2",
-                "content": "อัปเดตแล้วเปิดไม่ได้ ต้องลบแอพติดตั้งใหม่ทุกครั้ง ช่วยดูให้หน่อย",
-                "created_at": "2026-03-24T02:00:00Z",
+                "author_id": "3",
+                "channel_id": "10",
+                "content": "กดตรงไหนถึงจะเข้า code ai ได้",
+                "created_at": "2026-03-24T00:03:00Z",
+                "is_target_language": True,
+                "quality_score": 1.0,
+            },
+            {
+                "author_id": "4",
+                "channel_id": "10",
+                "content": "กดตรงไหนถึงจะเข้า code ai ได้",
+                "created_at": "2026-03-24T00:04:00Z",
                 "is_target_language": True,
                 "quality_score": 1.0,
             },
         ]
     )
 
-    result = run_pipeline_from_dataframe(
+    result = build_interval_pipeline_bundle_from_dataframe(
         df=df,
         report_date="2026-03-24",
         timezone_name="Asia/Shanghai",
         window_start=datetime(2026, 3, 24, 0, 0, tzinfo=timezone.utc),
-        window_end=datetime(2026, 3, 24, 23, 59, tzinfo=timezone.utc),
+        window_end=datetime(2026, 3, 24, 2, 0, tzinfo=timezone.utc),
+        shard_char_budget=220,
+        shard_max_items=1,
     )
 
     report = result["report"]
-    assert report["source_message_count"] == 2
-    assert report["target_message_count"] == 2
-    assert report["pipeline_stats"]["filter_details"].get("longform_story", 0) == 1
-    assert report["total_clusters"] >= 1
-    assert "มารีน่า" not in result["markdown"]
+    assert report["source_message_count"] == 4
+    assert report["candidate_message_count"] == 3
+    assert report["candidate_group_count"] == 2
+    assert report["filter_details"]["filler"] == 1
+    assert report["shard_count"] == 2
+    assert result["candidates"][0]["signal_score"] >= result["candidates"][1]["signal_score"]
 
 
-def test_daily_report_service_generates_today_so_far_report(tmp_path):
+def test_daily_report_service_generates_hourly_and_daily_reports(tmp_path):
     db = _make_db(tmp_path)
-    now = datetime(2026, 3, 24, 12, 30, tzinfo=SHANGHAI_TZ)
+    report_date = date(2026, 3, 24)
 
     db.upsert_message(
         _message_payload(
             message_id=1,
-            content="อัปเดตแล้วเปิดไม่ได้",
-            created_at=datetime(2026, 3, 24, 1, 0, tzinfo=timezone.utc),
+            content="อัปเดตแล้วเปิดไม่ได้ ต้องลบแอพติดตั้งใหม่",
+            created_at=datetime(2026, 3, 23, 16, 30, tzinfo=timezone.utc),
             is_target_language=True,
         )
     )
     db.upsert_message(
         _message_payload(
             message_id=2,
-            content="misc note",
-            created_at=datetime(2026, 3, 24, 2, 0, tzinfo=timezone.utc),
-            is_target_language=False,
+            content="กดตรงไหนถึงจะเข้า code ai ได้",
+            created_at=datetime(2026, 3, 23, 18, 10, tzinfo=timezone.utc),
+            is_target_language=True,
+        )
+    )
+
+    service = DailyReportService(db=db, translator=FakeTranslator())
+    service.generate_hourly_report_for_window(
+        report_date,
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+    )
+    service.generate_hourly_report_for_window(
+        report_date,
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 20, 0, tzinfo=timezone.utc),
+    )
+
+    report = service.generate_daily_report_from_hourly_reports(report_date)
+    stored = db.get_daily_report_by_date(report_date)
+
+    assert report.id == stored.id
+    assert stored.source_message_count == 2
+    assert stored.target_message_count == 2
+    assert db.count_hourly_reports(report_date) == 12
+    assert "每日报告" in stored.content_cn
+    assert "重点问题" in stored.content_cn
+    assert "产品机会" in stored.content_cn
+
+
+def test_generate_today_so_far_report_uses_today_window(tmp_path):
+    db = _make_db(tmp_path)
+    now = datetime(2026, 3, 24, 12, 30, tzinfo=SHANGHAI_TZ)
+
+    db.upsert_message(
+        _message_payload(
+            message_id=1,
+            content="เมื่อวานมีบัคแต่วันนี้หายแล้ว",
+            created_at=datetime(2026, 3, 23, 15, 59, tzinfo=timezone.utc),
+            is_target_language=True,
+        )
+    )
+    db.upsert_message(
+        _message_payload(
+            message_id=2,
+            content="วันนี้เข้าไม่ได้หลังอัปเดต",
+            created_at=datetime(2026, 3, 24, 1, 0, tzinfo=timezone.utc),
+            is_target_language=True,
         )
     )
 
@@ -169,18 +240,25 @@ def test_daily_report_service_generates_today_so_far_report(tmp_path):
 
     stored = db.get_daily_report_by_date(date(2026, 3, 24))
     assert report.id == stored.id
-    assert stored.source_message_count == 2
+    assert stored.source_message_count == 1
     assert stored.target_message_count == 1
-    assert stored.content.startswith("# รายงานประจำวัน")
-    assert stored.content_cn.startswith("# 中文版")
+    assert stored.window_start.replace(tzinfo=timezone.utc) == datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc)
+    assert stored.window_end.replace(tzinfo=timezone.utc) == now.astimezone(timezone.utc)
 
 
-def test_previous_day_window_uses_shanghai_calendar():
+def test_previous_day_and_interval_windows_use_shanghai_calendar():
     service = DailyReportService(db=Database("sqlite+pysqlite:///:memory:"), translator=FakeTranslator())
+
     report_date, window_start, window_end = service.build_previous_day_window(
         now=datetime(2026, 3, 25, 0, 5, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+    interval_date, interval_start, interval_end = service.build_last_completed_interval_window(
+        now=datetime(2026, 3, 24, 10, 5, tzinfo=ZoneInfo("Asia/Shanghai"))
     )
 
     assert report_date == date(2026, 3, 24)
     assert window_start == datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc)
     assert window_end == datetime(2026, 3, 24, 16, 0, tzinfo=timezone.utc)
+    assert interval_date == date(2026, 3, 24)
+    assert interval_start == datetime(2026, 3, 24, 0, 0, tzinfo=timezone.utc)
+    assert interval_end == datetime(2026, 3, 24, 2, 0, tzinfo=timezone.utc)

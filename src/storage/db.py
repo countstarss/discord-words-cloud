@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .models import (
     Base,
     DailyReport,
+    HourlyReport,
     Message,
 )
 
@@ -235,6 +236,60 @@ class Database:
     def count_daily_reports(self) -> int:
         with self.session() as db:
             stmt = select(func.count()).select_from(DailyReport)
+            return int(db.scalar(stmt) or 0)
+
+    # MARK: - Hourly Report CRUD
+    def upsert_hourly_report(self, payload: Dict[str, Any]) -> HourlyReport:
+        with self.session() as db:
+            stmt = (
+                select(HourlyReport)
+                .where(HourlyReport.window_start == payload["window_start"])
+                .where(HourlyReport.window_end == payload["window_end"])
+                .where(HourlyReport.timezone == payload["timezone"])
+            )
+            existing = db.scalar(stmt)
+            if existing is None:
+                existing = HourlyReport(**payload)
+                db.add(existing)
+                db.flush()
+                return existing
+
+            for key, value in payload.items():
+                if key == "id":
+                    continue
+                setattr(existing, key, value)
+            db.flush()
+            return existing
+
+    def get_hourly_report_by_window(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        timezone_name: str = "Asia/Shanghai",
+    ) -> Optional[HourlyReport]:
+        with self.session() as db:
+            stmt = (
+                select(HourlyReport)
+                .where(HourlyReport.window_start == window_start)
+                .where(HourlyReport.window_end == window_end)
+                .where(HourlyReport.timezone == timezone_name)
+            )
+            return db.scalar(stmt)
+
+    def get_hourly_reports_for_date(self, report_date: date) -> List[HourlyReport]:
+        with self.session() as db:
+            stmt = (
+                select(HourlyReport)
+                .where(HourlyReport.report_date == report_date)
+                .order_by(HourlyReport.window_start.asc())
+            )
+            return list(db.scalars(stmt))
+
+    def count_hourly_reports(self, report_date: Optional[date] = None) -> int:
+        with self.session() as db:
+            stmt = select(func.count()).select_from(HourlyReport)
+            if report_date is not None:
+                stmt = stmt.where(HourlyReport.report_date == report_date)
             return int(db.scalar(stmt) or 0)
 
     # MARK: - Stats
