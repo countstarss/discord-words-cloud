@@ -48,9 +48,9 @@ class ReportScope:
 
 
 def build_report_scopes(targets: Optional[dict[str, Any]]) -> list[ReportScope]:
-    scopes = [ReportScope(scope_type="global", scope_key="global")]
+    scopes: list[ReportScope] = []
     targets = targets or {}
-    seen = {"global"}
+    seen: set[str] = set()
     for region in targets.get("regions", []) or []:
         region_key = str(region.get("key") or "__all__").strip() or "__all__"
         region_name = str(region.get("name") or region_key or "Region").strip()
@@ -444,9 +444,9 @@ class LLMBudgetConfig:
     window_hours: int = 5
     max_parallel_requests: int = 24
     max_scope_workers: int = 6
-    target_items_per_shard: int = 12
-    min_shard_chars: int = 4_000
-    max_shard_chars: int = 14_000
+    target_items_per_shard: int = 28
+    min_shard_chars: int = 6_000
+    max_shard_chars: int = 32_000
     reserve_calls: int = 120
 
     @property
@@ -462,9 +462,9 @@ class LLMBudgetConfig:
             window_hours=int(raw.get("window_hours", 5)),
             max_parallel_requests=max(1, int(raw.get("max_parallel_requests", 24))),
             max_scope_workers=max(1, int(raw.get("max_scope_workers", 6))),
-            target_items_per_shard=max(1, int(raw.get("target_items_per_shard", 12))),
-            min_shard_chars=max(2_000, int(raw.get("min_shard_chars", 4_000))),
-            max_shard_chars=max(4_000, int(raw.get("max_shard_chars", 14_000))),
+            target_items_per_shard=max(1, int(raw.get("target_items_per_shard", 28))),
+            min_shard_chars=max(2_000, int(raw.get("min_shard_chars", 6_000))),
+            max_shard_chars=max(4_000, int(raw.get("max_shard_chars", 32_000))),
             reserve_calls=max(0, int(raw.get("reserve_calls", 120))),
         )
 
@@ -689,7 +689,7 @@ class DailyReportTranslator:
         source_message_count: int,
         candidate_message_count: int,
         active_user_count: int,
-        max_batch_chars: int = 18_000,
+        max_batch_chars: int = 40_000,
         depth: int = 0,
     ) -> str:
         cleaned_reports = [text.strip() for text in shard_reports if str(text or "").strip()]
@@ -782,7 +782,7 @@ class DailyReportService:
         self.timezone_name = timezone_name
         self.local_tz = ZoneInfo(timezone_name)
         self.interval_hours = interval_hours
-        self.scopes = scopes or [ReportScope(scope_type="global", scope_key="global")]
+        self.scopes = scopes or []
 
     def _max_scope_workers(self) -> int:
         if self.translator is None:
@@ -799,12 +799,12 @@ class DailyReportService:
         return [scope for scope in self.scopes if scope.scope_type != "global"]
 
     def iter_hourly_scopes(self) -> list[ReportScope]:
-        """Return scopes that need hourly reports (global + channel, NOT region)."""
-        return [scope for scope in self.scopes if scope.scope_type != "region"]
+        """Return scopes that need hourly reports (channel only, NOT region)."""
+        return [scope for scope in self.scopes if scope.scope_type == "channel"]
 
     def iter_daily_scopes(self) -> list[ReportScope]:
-        """Return all scopes that need daily reports (global + region + channel)."""
-        return list(self.scopes)
+        """Return scopes that need daily reports (region only)."""
+        return [scope for scope in self.scopes if scope.scope_type == "region"]
 
     def get_channel_scopes_for_region(self, region_key: str) -> list[ReportScope]:
         """Return all channel scopes belonging to a given region."""
