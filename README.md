@@ -67,7 +67,7 @@ This will be normalized into a grouped target map for the collector and dashboar
   - 频道标题2
   - 频道标题3
 
-The legacy flat configuration still works if you only want raw IDs:
+The legacy flat configuration still works if you only want raw IDs, but it is now considered compatibility mode:
 
 ```yaml
 targets:
@@ -145,4 +145,4 @@ Target configuration notes:
 - `DISCORD_REGION_CHANNELS` is the recommended future-proof option when you need multiple regions and named channels.
 - Each region supports `key`, `name`, `guild_id` or `guild_ids`, and a `channels` list.
 - Each channel supports `id`, `name`, and optional `guild_id` or `guild_ids`.
-- `TARGET_GUILD_IDS` and `TARGET_CHANNEL_IDS` still work and are automatically mapped into the new normalized target structure.
+- `TARGET_GUILD_IDS` and `TARGET_CHANNEL_IDS` still work for compatibility, but `DISCORD_REGION_CHANNELS` should be treated as the primary configuration entry going forward.

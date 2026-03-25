@@ -345,15 +345,12 @@ class DiscordCollector(discord.Client):
 
     # MARK: - Event Hooks
     async def on_ready(self) -> None:
-        print(f"Collector logged in as {self.user} ({self.user.id})")
-        print(f"Connected guilds: {len(self.guilds)}")
-        print(f"Target guild IDs: {sorted(self.target_guilds) if self.target_guilds else 'ALL'}")
-        print(f"Target channel IDs: {sorted(self.target_channels) if self.target_channels else 'ALL'}")
+        print(f"[bot] ready user={self.user} guilds={len(self.guilds)} targets={len(self.target_channels or []) or 'ALL'}")
         for line in self._format_target_groups():
-            print(f"[collector-targets] {line}")
+            print(f"[targets] {line}")
         if self.target_channels is None:
-            print("[collector] no target channel configured; live collection is currently reading ALL visible channels")
-        print(f"[collector] backfill enabled={self.backfill_enabled} limit_per_channel={self.backfill_limit_per_channel}")
+            print("[targets] ALL visible channels")
+        print(f"[bot] backfill={'on' if self.backfill_enabled else 'off'} limit={self.backfill_limit_per_channel}")
         if self.backfill_enabled and not self._backfill_started:
             self._backfill_started = True
             asyncio.create_task(self._run_backfill())
@@ -368,6 +365,9 @@ class DiscordCollector(discord.Client):
 
         for channel in channels:
             channel_new = 0
+            channel_meta = self.channel_registry.get(int(channel.id), {})
+            region_name = str(channel_meta.get("region_name") or "Default").strip()
+            channel_name = str(channel_meta.get("channel_name") or getattr(channel, "name", channel.id)).strip()
             try:
                 async for message in channel.history(limit=history_limit, oldest_first=self.backfill_oldest_first):
                     payload = self._build_payload(message, event_type="create")
@@ -377,17 +377,15 @@ class DiscordCollector(discord.Client):
                     if inserted:
                         total += 1
                         channel_new += 1
-                        if channel_new % 25 == 0:
-                            print(f"[backfill] channel={channel.id} new={channel_new}")
             except Exception as exc:
                 self.metrics["errors"] = int(self.metrics["errors"]) + 1
-                print(f"[backfill] failed channel={channel.id}: {exc}")
+                print(f"[backfill] [{region_name}] - [{channel_name}] error={exc}")
             else:
-                print(f"[backfill] channel={channel.id} completed new={channel_new}")
+                print(f"[backfill] [{region_name}] - [{channel_name}] +{channel_new}")
 
         self.metrics["backfill_messages"] = total
         self.metrics["backfill_done"] = True
-        print(f"[backfill] completed channels={len(channels)} messages={total}")
+        print(f"[backfill] done channels={len(channels)} messages={total}")
 
     async def _resolve_backfill_channels(self) -> List[discord.abc.Messageable]:
         channels: List[discord.abc.Messageable] = []
@@ -427,8 +425,7 @@ class DiscordCollector(discord.Client):
             if inserted:
                 self.metrics["stored"] = int(self.metrics["stored"]) + 1
                 print(
-                    f"[collect] +1 new message total_new={self.metrics['stored']} "
-                    f"channel={message.channel.id} message_id={message.id}"
+                    f"[collect] +1 [{payload['region_name']}] - [{payload['channel_name']}] - message_id ={message.id}"
                 )
             self.metrics["last_message_at"] = datetime.now(timezone.utc).isoformat()
         except Exception:
@@ -440,7 +437,7 @@ class DiscordCollector(discord.Client):
             return
         try:
             self.db.upsert_message(payload)
-            print(f"[collect] message updated channel={after.channel.id} message_id={after.id}")
+            print(f"[update] [{payload['region_name']}] - [{payload['channel_name']}] - message_id ={after.id}")
         except Exception:
             self.metrics["errors"] = int(self.metrics["errors"]) + 1
 
@@ -448,6 +445,6 @@ class DiscordCollector(discord.Client):
         try:
             deleted_at = datetime.now(timezone.utc)
             self.db.mark_deleted(int(message.id), deleted_at=deleted_at)
-            print(f"[collect] message deleted message_id={message.id}")
+            print(f"[delete] message_id ={message.id}")
         except Exception:
             self.metrics["errors"] = int(self.metrics["errors"]) + 1

@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from src.pipeline import build_interval_pipeline_bundle_from_dataframe
-from src.reports.service import DailyReportService, SHANGHAI_TZ, render_daily_markdown
+from src.reports.service import DailyReportService, ReportScope, SHANGHAI_TZ, render_daily_markdown
 from src.storage import Database
 
 
@@ -73,12 +73,21 @@ def _message_payload(
     is_target_language: bool,
     *,
     channel_id: int = 10,
+    region_key: str = "default",
+    region_name: str = "Default",
+    channel_name: str = "channel 10",
+    channel_group: str = "chat",
 ) -> dict:
     return {
         "message_id": message_id,
         "guild_id": 1,
         "channel_id": channel_id,
         "author_id": 100 + message_id,
+        "region_key": region_key,
+        "region_name": region_name,
+        "channel_name": channel_name,
+        "channel_group": channel_group,
+        "scope_key": f"{region_key}:{channel_id}",
         "content": content,
         "is_target_language": is_target_language,
         "language": "th" if is_target_language else "other",
@@ -273,3 +282,82 @@ def test_previous_day_and_interval_windows_use_shanghai_calendar():
     assert interval_date == date(2026, 3, 24)
     assert interval_start == datetime(2026, 3, 24, 0, 0, tzinfo=timezone.utc)
     assert interval_end == datetime(2026, 3, 24, 2, 0, tzinfo=timezone.utc)
+
+
+def test_channel_scoped_reports_are_generated_separately(tmp_path):
+    db = _make_db(tmp_path)
+    report_date = date(2026, 3, 24)
+
+    db.upsert_message(
+        _message_payload(
+            message_id=11,
+            content="อัปเดตแล้วส่งข้อความไม่ได้",
+            created_at=datetime(2026, 3, 23, 16, 20, tzinfo=timezone.utc),
+            is_target_language=True,
+            channel_id=1400146275512352799,
+            region_key="th",
+            region_name="泰国",
+            channel_name="聊天室",
+        )
+    )
+    db.upsert_message(
+        _message_payload(
+            message_id=12,
+            content="อยากให้เพิ่มประวัติการสนทนา",
+            created_at=datetime(2026, 3, 23, 16, 50, tzinfo=timezone.utc),
+            is_target_language=True,
+            channel_id=1400147594625290370,
+            region_key="th",
+            region_name="泰国",
+            channel_name="Rubii反馈",
+            channel_group="feedback",
+        )
+    )
+
+    scopes = [
+        ReportScope(scope_type="global", scope_key="global"),
+        ReportScope(
+            scope_type="channel",
+            scope_key="th:1400146275512352799",
+            region_key="th",
+            region_name="泰国",
+            channel_id=1400146275512352799,
+            channel_name="聊天室",
+        ),
+        ReportScope(
+            scope_type="channel",
+            scope_key="th:1400147594625290370",
+            region_key="th",
+            region_name="泰国",
+            channel_id=1400147594625290370,
+            channel_name="Rubii反馈",
+        ),
+    ]
+    service = DailyReportService(db=db, translator=FakeTranslator(), scopes=scopes)
+    reports = service.generate_hourly_reports_for_window(
+        report_date,
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(reports) == 3
+    global_report = db.get_hourly_report_by_window(
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+        scope_key="global",
+    )
+    chat_report = db.get_hourly_report_by_window(
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+        scope_key="th:1400146275512352799",
+    )
+    feedback_report = db.get_hourly_report_by_window(
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+        scope_key="th:1400147594625290370",
+    )
+
+    assert global_report is not None and global_report.source_message_count == 2
+    assert chat_report is not None and chat_report.source_message_count == 1
+    assert feedback_report is not None and feedback_report.source_message_count == 1
+    assert feedback_report.channel_name == "Rubii反馈"

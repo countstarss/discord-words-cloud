@@ -23,10 +23,54 @@ from ..storage import Database
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
 SECTION_LIMITS = {
-    "urgent_issues": 12,
-    "product_opportunities": 10,
-    "general_feedback": 8,
+    "urgent_issues": 16,
+    "product_opportunities": 12,
+    "general_feedback": 10,
 }
+
+
+@dataclass(frozen=True)
+class ReportScope:
+    scope_type: str
+    scope_key: str
+    region_key: str = "__all__"
+    region_name: str = "全部"
+    channel_id: int = 0
+    channel_name: str = "全部频道"
+
+    @property
+    def display_name(self) -> str:
+        if self.scope_type == "global":
+            return "全部频道"
+        return f"{self.region_name} / {self.channel_name}"
+
+
+def build_report_scopes(targets: Optional[dict[str, Any]]) -> list[ReportScope]:
+    scopes = [ReportScope(scope_type="global", scope_key="global")]
+    targets = targets or {}
+    seen = {"global"}
+    for region in targets.get("regions", []) or []:
+        region_key = str(region.get("key") or "__all__").strip() or "__all__"
+        region_name = str(region.get("name") or region_key or "Region").strip()
+        for channel in region.get("channels", []) or []:
+            channel_id = int(channel.get("id") or 0)
+            if channel_id <= 0:
+                continue
+            scope_key = f"{region_key}:{channel_id}"
+            if scope_key in seen:
+                continue
+            seen.add(scope_key)
+            scopes.append(
+                ReportScope(
+                    scope_type="channel",
+                    scope_key=scope_key,
+                    region_key=region_key,
+                    region_name=region_name,
+                    channel_id=channel_id,
+                    channel_name=str(channel.get("name") or f"channel {channel_id}").strip(),
+                )
+            )
+    return scopes
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -289,12 +333,20 @@ def build_empty_summary(
     timezone_name: str,
     window_start: datetime,
     window_end: datetime,
+    scope: Optional[ReportScope] = None,
 ) -> dict[str, Any]:
+    scope = scope or ReportScope(scope_type="global", scope_key="global")
     return {
         "report_date": report_date.isoformat(),
         "timezone": timezone_name,
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
+        "scope_type": scope.scope_type,
+        "scope_key": scope.scope_key,
+        "region_key": scope.region_key,
+        "region_name": scope.region_name,
+        "channel_id": scope.channel_id,
+        "channel_name": scope.channel_name,
         "source_message_count": 0,
         "target_message_count": 0,
         "candidate_message_count": 0,
@@ -312,14 +364,15 @@ def build_empty_summary(
 
 @dataclass
 class LLMBudgetConfig:
-    quota_per_5h: int = 600
-    utilization_ratio: float = 0.8
+    quota_per_5h: int = 4500
+    utilization_ratio: float = 0.88
     window_hours: int = 5
-    max_parallel_requests: int = 6
-    target_items_per_shard: int = 18
-    min_shard_chars: int = 6_000
-    max_shard_chars: int = 16_000
-    reserve_calls: int = 24
+    max_parallel_requests: int = 24
+    max_scope_workers: int = 6
+    target_items_per_shard: int = 12
+    min_shard_chars: int = 4_000
+    max_shard_chars: int = 14_000
+    reserve_calls: int = 120
 
     @property
     def effective_call_limit(self) -> int:
@@ -329,14 +382,15 @@ class LLMBudgetConfig:
     def from_config(cls, raw: Optional[dict[str, Any]]) -> "LLMBudgetConfig":
         raw = raw or {}
         return cls(
-            quota_per_5h=int(raw.get("quota_per_5h", 600)),
-            utilization_ratio=float(raw.get("utilization_ratio", 0.8)),
+            quota_per_5h=int(raw.get("quota_per_5h", 4500)),
+            utilization_ratio=float(raw.get("utilization_ratio", 0.88)),
             window_hours=int(raw.get("window_hours", 5)),
-            max_parallel_requests=max(1, int(raw.get("max_parallel_requests", 6))),
-            target_items_per_shard=max(1, int(raw.get("target_items_per_shard", 18))),
-            min_shard_chars=max(2_000, int(raw.get("min_shard_chars", 6_000))),
-            max_shard_chars=max(4_000, int(raw.get("max_shard_chars", 16_000))),
-            reserve_calls=max(0, int(raw.get("reserve_calls", 24))),
+            max_parallel_requests=max(1, int(raw.get("max_parallel_requests", 24))),
+            max_scope_workers=max(1, int(raw.get("max_scope_workers", 6))),
+            target_items_per_shard=max(1, int(raw.get("target_items_per_shard", 12))),
+            min_shard_chars=max(2_000, int(raw.get("min_shard_chars", 4_000))),
+            max_shard_chars=max(4_000, int(raw.get("max_shard_chars", 14_000))),
+            reserve_calls=max(0, int(raw.get("reserve_calls", 120))),
         )
 
 
@@ -393,6 +447,7 @@ class DailyReportTranslator:
 
     def __post_init__(self) -> None:
         self._budget = RollingCallBudget(self.budget_config)
+        self._request_slots = threading.BoundedSemaphore(self.budget_config.max_parallel_requests)
 
     def _messages_url(self) -> str:
         base = self.base_url.rstrip("/")
@@ -446,8 +501,9 @@ class DailyReportTranslator:
         for attempt in range(1, 4):
             try:
                 self._budget.acquire_slot()
-                with httpx.Client(timeout=timeout) as client:
-                    response = client.post(self._messages_url(), headers=headers, json=payload)
+                with self._request_slots:
+                    with httpx.Client(timeout=timeout) as client:
+                        response = client.post(self._messages_url(), headers=headers, json=payload)
                 if response.status_code == 429 or response.status_code >= 500:
                     response.raise_for_status()
                 response.raise_for_status()
@@ -474,31 +530,31 @@ class DailyReportTranslator:
 
     def summarize_signal_shard(self, shard: dict[str, Any]) -> dict[str, Any]:
         system = (
-            "You are a product intelligence analyst. "
-            "Summarize batched Discord feedback into a strict JSON object only. "
-            "Keep the most important issues, opportunities, and general feedback. "
-            "Ignore small talk unless it clearly contains product-relevant signal. "
-            "Never output markdown, never wrap the JSON in commentary."
+            "你是产品情报分析助手。"
+            "你会阅读一批 Discord 消息候选信号，并输出严格 JSON。"
+            "尽量保留有价值的问题、机会、一般反馈和关键证据。"
+            "忽略明显无关的寒暄，但不要过度丢弃潜在有用信息。"
+            "不要输出 markdown，不要输出解释，不要输出 JSON 之外的任何文本。"
         )
         user_content = (
-            "Return a JSON object with exactly these top-level keys:\n"
+            "请返回一个 JSON 对象，并且只能包含下面这些顶层键：\n"
             "{\n"
             '  "urgent_issues": [...],\n'
             '  "product_opportunities": [...],\n'
             '  "general_feedback": [...],\n'
-            '  "sentiment": {"score": "negative|neutral|positive", "reason": "short Chinese sentence"}\n'
+            '  "sentiment": {"score": "negative|neutral|positive", "reason": "简短中文原因"}\n'
             "}\n\n"
-            "Rules:\n"
-            '- each item must contain: "key", "category", "priority", "title", "summary", '
+            "字段规则：\n"
+            '- 每个条目都必须包含："key", "category", "priority", "title", "summary", '
             '"message_count", "unique_user_count", "channel_ids", "evidence", "action_hint"\n'
-            '- "key" must be english_snake_case and stable\n'
-            '- "priority" must be one of high, medium, low\n'
-            '- "title" and "summary" should be concise Simplified Chinese\n'
-            '- "evidence" must be 1-3 short original-language excerpts when available\n'
-            '- urgent_issues max 8 items, product_opportunities max 6 items, general_feedback max 4 items\n'
-            '- use only facts supported by the input; merge semantically similar complaints inside the shard\n'
-            "- if there is no meaningful product signal, return empty arrays and neutral sentiment\n\n"
-            f"Shard payload:\n{json.dumps(shard, ensure_ascii=False)}"
+            '- "key" 必须是稳定的 english_snake_case\n'
+            '- "priority" 只能是 high / medium / low\n'
+            '- "title" 和 "summary" 必须使用简体中文\n'
+            '- "evidence" 保留 1 到 4 条原始语言短摘录\n'
+            '- 尽量合并语义接近的问题，保留更充分的证据和影响范围\n'
+            '- urgent_issues 最多 10 项，product_opportunities 最多 8 项，general_feedback 最多 6 项\n'
+            '- 如果产品信号很弱，返回空数组并给出 neutral sentiment\n\n'
+            f"下面是待总结的 JSON 数据：\n{json.dumps(shard, ensure_ascii=False)}"
         )
         text = self._request_text(system=system, user_content=user_content, max_tokens=4096)
         payload = _extract_json_object(text)
@@ -513,10 +569,11 @@ class DailyReportTranslator:
         system = (
             "你是产品情报分析助手。"
             "阅读用户提供的 JSON 数据，只根据 JSON 本身写出中文报告。"
-            "不要编造不存在的信息，不要输出 JSON，只输出中文报告正文。"
+            "直接生成自然、清晰、有重点的中文报告，不要套固定模板。"
+            "可以自行组织结构，但不要编造不存在的信息，不要输出 JSON。"
         )
-        user_content = f"把下面的JSON 总结成中文报告交给我：\n{json.dumps(summary, ensure_ascii=False)}"
-        return self._request_text(system=system, user_content=user_content, max_tokens=4096).strip()
+        user_content = f"把下面的 JSON 总结成中文报告交给我：\n{json.dumps(summary, ensure_ascii=False)}"
+        return self._request_text(system=system, user_content=user_content, max_tokens=6144).strip()
 
 
 class DailyReportService:
@@ -526,15 +583,28 @@ class DailyReportService:
         translator: Optional[DailyReportTranslator] = None,
         timezone_name: str = "Asia/Shanghai",
         interval_hours: int = 2,
+        scopes: Optional[list[ReportScope]] = None,
     ) -> None:
         self.db = db
         self.translator = translator
         self.timezone_name = timezone_name
         self.local_tz = ZoneInfo(timezone_name)
         self.interval_hours = interval_hours
+        self.scopes = scopes or [ReportScope(scope_type="global", scope_key="global")]
 
-    def get_daily_report(self, report_date: date):
-        return self.db.get_daily_report_by_date(report_date)
+    def _max_scope_workers(self) -> int:
+        if self.translator is None:
+            return 1
+        budget_config = getattr(self.translator, "budget_config", None)
+        return max(1, int(getattr(budget_config, "max_scope_workers", 1)))
+
+    def get_daily_report(self, report_date: date, scope_key: str = "global"):
+        return self.db.get_daily_report_by_date(report_date, scope_key=scope_key)
+
+    def iter_scopes(self, include_global: bool = True) -> list[ReportScope]:
+        if include_global:
+            return list(self.scopes)
+        return [scope for scope in self.scopes if scope.scope_type != "global"]
 
     def _local_midnight(self, target_date: date) -> datetime:
         return datetime.combine(target_date, dt_time.min, tzinfo=self.local_tz)
@@ -576,16 +646,24 @@ class DailyReportService:
         report_date: date,
         window_start: datetime,
         window_end: datetime,
+        scope: Optional[ReportScope] = None,
     ) -> dict[str, Any]:
+        scope = scope or ReportScope(scope_type="global", scope_key="global")
         utc_start = _ensure_utc(window_start)
         utc_end = _ensure_utc(window_end)
-        messages = self.db.get_messages_for_window(utc_start, utc_end)
+        messages = self.db.get_messages_for_window(
+            utc_start,
+            utc_end,
+            channel_id=scope.channel_id or None,
+            scope_key=scope.scope_key if scope.scope_type != "global" else None,
+        )
         if not messages:
             return build_empty_summary(
                 report_date=report_date,
                 timezone_name=self.timezone_name,
                 window_start=utc_start,
                 window_end=utc_end,
+                scope=scope,
             )
 
         bundle = build_interval_pipeline_bundle_from_messages(
@@ -613,6 +691,12 @@ class DailyReportService:
             "timezone": report["timezone"],
             "window_start": report["window_start"],
             "window_end": report["window_end"],
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "region_key": scope.region_key,
+            "region_name": scope.region_name,
+            "channel_id": scope.channel_id,
+            "channel_name": scope.channel_name,
             "source_message_count": report["source_message_count"],
             "target_message_count": report["target_message_count"],
             "candidate_message_count": report["candidate_message_count"],
@@ -642,18 +726,15 @@ class DailyReportService:
         total_shards = len(bundle["shards"])
         if total_shards > 1:
             print(
-                f"[llm-shard] processing {total_shards} shards "
-                f"candidates={report['candidate_group_count']} raw_candidates={report.get('raw_candidate_group_count', report['candidate_group_count'])} "
-                f"parallel={execution_plan['parallel_requests']} remaining_calls={execution_plan['remaining_calls']}/{execution_plan['effective_call_limit']}"
+                f"[llm] {scope.display_name} shards={total_shards} "
+                f"candidates={report['candidate_group_count']} parallel={execution_plan['parallel_requests']} "
+                f"budget={execution_plan['remaining_calls']}/{execution_plan['effective_call_limit']}"
             )
         parallel_requests = int(execution_plan["parallel_requests"])
         if parallel_requests <= 1 or total_shards <= 1:
             for index, shard in enumerate(bundle["shards"], start=1):
                 if total_shards > 1:
-                    print(
-                        f"[llm-shard] {index}/{total_shards} "
-                        f"items={len(shard['items'])} messages={shard['stats'].get('message_count', 0)}"
-                    )
+                    print(f"[llm] {scope.display_name} {index}/{total_shards} chunks")
                 shard_summaries.append(self.translator.summarize_signal_shard(shard))
         else:
             shard_summaries = [None] * total_shards
@@ -664,11 +745,7 @@ class DailyReportService:
                 }
                 for future in as_completed(future_map):
                     index = future_map[future]
-                    shard = bundle["shards"][index - 1]
-                    print(
-                        f"[llm-shard] done {index}/{total_shards} "
-                        f"items={len(shard['items'])} messages={shard['stats'].get('message_count', 0)}"
-                    )
+                    print(f"[llm] {scope.display_name} done {index}/{total_shards}")
                     shard_summaries[index - 1] = future.result()
         summary = dict(base_summary)
         summary["urgent_issues"] = _merge_section_items(shard_summaries, "urgent_issues")
@@ -677,16 +754,29 @@ class DailyReportService:
         summary["sentiment"] = _derive_sentiment(summary)
         return summary
 
-    def generate_hourly_report_for_window(self, report_date: date, window_start: datetime, window_end: datetime):
+    def generate_hourly_report_for_window(
+        self,
+        report_date: date,
+        window_start: datetime,
+        window_end: datetime,
+        scope: Optional[ReportScope] = None,
+    ):
+        scope = scope or ReportScope(scope_type="global", scope_key="global")
         summary = self._build_summary_from_messages(
             report_date=report_date,
             window_start=window_start,
             window_end=window_end,
+            scope=scope,
         )
         now = datetime.now(tz=timezone.utc)
         payload = {
             "report_date": report_date,
             "timezone": self.timezone_name,
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "region_key": scope.region_key,
+            "channel_id": scope.channel_id,
+            "channel_name": scope.channel_name,
             "window_start": _ensure_utc(window_start),
             "window_end": _ensure_utc(window_end),
             "content_json": summary,
@@ -703,6 +793,32 @@ class DailyReportService:
         report_date, window_start, window_end = self.build_last_completed_interval_window(now=now)
         return self.generate_hourly_report_for_window(report_date, window_start, window_end)
 
+    def generate_last_completed_interval_reports(self, now: Optional[datetime] = None) -> list[Any]:
+        report_date, window_start, window_end = self.build_last_completed_interval_window(now=now)
+        return self.generate_hourly_reports_for_window(report_date, window_start, window_end)
+
+    def generate_hourly_reports_for_window(
+        self,
+        report_date: date,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[Any]:
+        results: list[Any] = []
+        scope_workers = min(len(self.scopes), self._max_scope_workers())
+        if scope_workers <= 1 or len(self.scopes) <= 1:
+            for scope in self.scopes:
+                results.append(self.generate_hourly_report_for_window(report_date, window_start, window_end, scope=scope))
+            return results
+
+        with ThreadPoolExecutor(max_workers=scope_workers) as executor:
+            future_map = {
+                executor.submit(self.generate_hourly_report_for_window, report_date, window_start, window_end, scope): scope
+                for scope in self.scopes
+            }
+            for future in as_completed(future_map):
+                results.append(future.result())
+        return sorted(results, key=lambda item: (item.scope_type != "global", item.region_key, item.channel_name))
+
     def backfill_recent_hourly_reports(self, now: Optional[datetime] = None) -> int:
         local_now = (now or datetime.now(tz=self.local_tz)).astimezone(self.local_tz)
         utc_now = local_now.astimezone(timezone.utc)
@@ -711,13 +827,15 @@ class DailyReportService:
             for _, window_start, window_end in self.iter_interval_windows_for_date(report_date):
                 if window_end > utc_now:
                     continue
-                if self.db.get_hourly_report_by_window(window_start, window_end, self.timezone_name) is not None:
-                    continue
-                self.generate_hourly_report_for_window(report_date, window_start, window_end)
-                created += 1
+                for scope in self.scopes:
+                    if self.db.get_hourly_report_by_window(window_start, window_end, self.timezone_name, scope_key=scope.scope_key) is not None:
+                        continue
+                    self.generate_hourly_report_for_window(report_date, window_start, window_end, scope=scope)
+                    created += 1
         return created
 
-    def _merge_hourly_reports(self, report_date: date, hourly_reports: list[Any]) -> dict[str, Any]:
+    def _merge_hourly_reports(self, report_date: date, hourly_reports: list[Any], scope: Optional[ReportScope] = None) -> dict[str, Any]:
+        scope = scope or ReportScope(scope_type="global", scope_key="global")
         if not hourly_reports:
             _, window_start, window_end = self.build_previous_day_window(
                 now=datetime.combine(report_date + timedelta(days=1), dt_time.min, tzinfo=self.local_tz)
@@ -727,11 +845,17 @@ class DailyReportService:
                 timezone_name=self.timezone_name,
                 window_start=window_start,
                 window_end=window_end,
+                scope=scope,
             )
 
         window_start = min(report.window_start for report in hourly_reports)
         window_end = max(report.window_end for report in hourly_reports)
-        messages = self.db.get_messages_for_window(window_start, window_end)
+        messages = self.db.get_messages_for_window(
+            window_start,
+            window_end,
+            channel_id=scope.channel_id or None,
+            scope_key=scope.scope_key if scope.scope_type != "global" else None,
+        )
         filter_details: dict[str, int] = {}
         channel_ids = set()
         for report in hourly_reports:
@@ -745,6 +869,12 @@ class DailyReportService:
             "timezone": self.timezone_name,
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "region_key": scope.region_key,
+            "region_name": scope.region_name,
+            "channel_id": scope.channel_id,
+            "channel_name": scope.channel_name,
             "source_message_count": sum(int(report.source_message_count or 0) for report in hourly_reports),
             "target_message_count": sum(int(report.target_message_count or 0) for report in hourly_reports),
             "candidate_message_count": sum(int(report.candidate_message_count or 0) for report in hourly_reports),
@@ -761,14 +891,15 @@ class DailyReportService:
         summary["sentiment"] = _derive_sentiment(summary)
         return summary
 
-    def generate_daily_report_from_hourly_reports(self, report_date: date):
+    def generate_daily_report_from_hourly_reports(self, report_date: date, scope: Optional[ReportScope] = None):
+        scope = scope or ReportScope(scope_type="global", scope_key="global")
         expected_windows = self.iter_interval_windows_for_date(report_date)
         for _, window_start, window_end in expected_windows:
-            if self.db.get_hourly_report_by_window(window_start, window_end, self.timezone_name) is None:
-                self.generate_hourly_report_for_window(report_date, window_start, window_end)
+            if self.db.get_hourly_report_by_window(window_start, window_end, self.timezone_name, scope_key=scope.scope_key) is None:
+                self.generate_hourly_report_for_window(report_date, window_start, window_end, scope=scope)
 
-        hourly_reports = self.db.get_hourly_reports_for_date(report_date)
-        summary = self._merge_hourly_reports(report_date, hourly_reports)
+        hourly_reports = self.db.get_hourly_reports_for_date(report_date, scope_key=scope.scope_key)
+        summary = self._merge_hourly_reports(report_date, hourly_reports, scope=scope)
         markdown = (
             _empty_daily_markdown(report_date, _ensure_utc(expected_windows[0][1]), _ensure_utc(expected_windows[-1][2]))
             if summary["source_message_count"] == 0
@@ -777,6 +908,12 @@ class DailyReportService:
         llm_daily_payload = {
             "kind": "daily_report_from_hourly_reports",
             "report_date": report_date.isoformat(),
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "region_key": scope.region_key,
+            "region_name": scope.region_name,
+            "channel_id": scope.channel_id,
+            "channel_name": scope.channel_name,
             "timezone": self.timezone_name,
             "window_start": _ensure_utc(expected_windows[0][1]).isoformat(),
             "window_end": _ensure_utc(expected_windows[-1][2]).isoformat(),
@@ -791,6 +928,11 @@ class DailyReportService:
         payload = {
             "report_date": report_date,
             "timezone": self.timezone_name,
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "region_key": scope.region_key,
+            "channel_id": scope.channel_id,
+            "channel_name": scope.channel_name,
             "window_start": _ensure_utc(expected_windows[0][1]),
             "window_end": _ensure_utc(expected_windows[-1][2]),
             "content": markdown,
@@ -806,12 +948,31 @@ class DailyReportService:
         report_date, _, _ = self.build_previous_day_window(now=now)
         return self.generate_daily_report_from_hourly_reports(report_date)
 
-    def generate_today_so_far_report(self, now: Optional[datetime] = None):
+    def generate_previous_day_reports(self, now: Optional[datetime] = None) -> list[Any]:
+        report_date, _, _ = self.build_previous_day_window(now=now)
+        results: list[Any] = []
+        scope_workers = min(len(self.scopes), self._max_scope_workers())
+        if scope_workers <= 1 or len(self.scopes) <= 1:
+            for scope in self.scopes:
+                results.append(self.generate_daily_report_from_hourly_reports(report_date, scope=scope))
+            return results
+        with ThreadPoolExecutor(max_workers=scope_workers) as executor:
+            future_map = {
+                executor.submit(self.generate_daily_report_from_hourly_reports, report_date, scope): scope
+                for scope in self.scopes
+            }
+            for future in as_completed(future_map):
+                results.append(future.result())
+        return sorted(results, key=lambda item: (item.scope_type != "global", item.region_key, item.channel_name))
+
+    def generate_today_so_far_report(self, now: Optional[datetime] = None, scope: Optional[ReportScope] = None):
+        scope = scope or ReportScope(scope_type="global", scope_key="global")
         report_date, window_start, window_end = self.build_today_so_far_window(now=now)
         summary = self._build_summary_from_messages(
             report_date=report_date,
             window_start=window_start,
             window_end=window_end,
+            scope=scope,
         )
         summary["interval_count"] = max(1, int((window_end - window_start).total_seconds() // (self.interval_hours * 3600)))
         markdown = (
@@ -822,6 +983,12 @@ class DailyReportService:
         llm_preview_payload = {
             "kind": "today_so_far_preview",
             "report_date": report_date.isoformat(),
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "region_key": scope.region_key,
+            "region_name": scope.region_name,
+            "channel_id": scope.channel_id,
+            "channel_name": scope.channel_name,
             "timezone": self.timezone_name,
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
@@ -836,6 +1003,11 @@ class DailyReportService:
         payload = {
             "report_date": report_date,
             "timezone": self.timezone_name,
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "region_key": scope.region_key,
+            "channel_id": scope.channel_id,
+            "channel_name": scope.channel_name,
             "window_start": window_start,
             "window_end": window_end,
             "content": markdown,

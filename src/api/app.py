@@ -27,6 +27,7 @@ def _configured_regions() -> list[dict]:
                     "id": int(channel.get("id")),
                     "name": str(channel.get("name") or f"channel {channel.get('id')}").strip(),
                     "group": str(channel.get("group") or "").strip(),
+                    "scope_key": f"{str(region.get('key') or '').strip() or '__all__'}:{int(channel.get('id'))}",
                     "guild_ids": [int(item) for item in channel.get("guild_ids", []) or []],
                 }
             )
@@ -823,18 +824,38 @@ def get_dashboard() -> dict:
         "latest_report_date": latest_report.report_date.isoformat() if latest_report else None,
         "configured_channel_count": sum(len(region.get("channels", [])) for region in regions),
         "configured_regions": regions,
+        "available_scopes": [
+            {"scope_key": "global", "scope_type": "global", "label": "全部频道"}
+        ] + [
+            {
+                "scope_key": channel["scope_key"],
+                "scope_type": "channel",
+                "label": f"{region['name']} / {channel['name']}",
+                "region_key": region["key"],
+                "region_name": region["name"],
+                "channel_id": channel["id"],
+                "channel_name": channel["name"],
+            }
+            for region in regions
+            for channel in region.get("channels", [])
+        ],
     }
 
 
 @app.get("/daily-report")
-def get_daily_reports() -> dict:
+def get_daily_reports(scope_key: str = Query(default="global")) -> dict:
     db = get_db()
-    reports = db.get_all_daily_reports()
+    reports = db.get_all_daily_reports(scope_key=scope_key)
     return {
         "reports": [
             {
                 "report_date": report.report_date.isoformat(),
                 "timezone": report.timezone,
+                "scope_type": report.scope_type,
+                "scope_key": report.scope_key,
+                "region_key": report.region_key,
+                "channel_id": report.channel_id,
+                "channel_name": report.channel_name,
                 "window_start": report.window_start.isoformat(),
                 "window_end": report.window_end.isoformat(),
                 "generated_at": report.generated_at.isoformat(),
