@@ -102,6 +102,15 @@ python3 -m src.api.app
 
 Open the dashboard at [http://127.0.0.1:8080/](http://127.0.0.1:8080/).
 
+**Start Flask web server:**
+```bash
+python3 -m src.main flask-web
+# or
+python3 -m src.web.flask_app
+```
+
+The first Flask version serves the same dashboard UI and API payloads as the current FastAPI page, while giving us a separate web layer for future UI expansion.
+
 **Start Discord bot:**
 ```bash
 python3 -m src.main bot

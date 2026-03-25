@@ -384,13 +384,55 @@ def _dashboard_html() -> str:
       .report-body h2 { font-size: 22px; }
       .report-body h3 { font-size: 17px; }
       .report-body p { margin: 0 0 0.95em; line-height: 1.78; color: #1f2937; }
-      .report-body ul { margin: 0 0 1.1em 1.1em; padding: 0; color: #1f2937; }
+      .report-body ul,
+      .report-body ol { margin: 0 0 1.1em 1.1em; padding: 0; color: #1f2937; }
+      .report-body ul ul,
+      .report-body ul ol,
+      .report-body ol ul,
+      .report-body ol ol {
+        margin-top: 0.55em;
+        margin-bottom: 0.55em;
+      }
       .report-body li { margin-bottom: 0.5em; line-height: 1.75; }
+      .report-body a {
+        color: #0f766e;
+        text-decoration: none;
+      }
+      .report-body a:hover { text-decoration: underline; }
+      .report-body blockquote {
+        margin: 0 0 1.1em;
+        padding: 12px 16px;
+        border-left: 3px solid rgba(14,165,233,0.35);
+        border-radius: 0 14px 14px 0;
+        background: rgba(14,165,233,0.05);
+        color: #334155;
+      }
+      .report-body blockquote p:last-child { margin-bottom: 0; }
+      .report-body pre {
+        margin: 0 0 1.1em;
+        padding: 14px 16px;
+        border-radius: 16px;
+        background: #0f172a;
+        color: #e2e8f0;
+        overflow: auto;
+        line-height: 1.6;
+      }
       .report-body code {
         padding: 2px 6px;
         border-radius: 8px;
         background: rgba(14,165,233,0.08);
         color: #0369a1;
+      }
+      .report-body pre code {
+        padding: 0;
+        border-radius: 0;
+        background: transparent;
+        color: inherit;
+      }
+      .report-body hr {
+        border: 0;
+        border-top: 1px solid var(--line);
+        margin: 1.5em 0;
       }
 
       .empty {
@@ -497,14 +539,6 @@ def _dashboard_html() -> str:
             </div>
           </div>
 
-          <div class="snapshot-note">
-            <span>Configured Coverage</span>
-            <strong id="configuredChannelCount">-- configured channels</strong>
-            <p>
-              Regions and channel aliases come from your .env configuration, so we can keep future per-channel reports readable in the dashboard.
-            </p>
-          </div>
-
           <div class="target-tree" id="targetTree">
             <div class="empty" style="padding:24px 12px;">Loading region and channel map...</div>
           </div>
@@ -534,7 +568,7 @@ def _dashboard_html() -> str:
       const state = { reports: [], summary: null, selectedDate: null };
 
       function escapeHtml(value) {
-        return value
+        return String(value ?? "")
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;")
@@ -542,53 +576,205 @@ def _dashboard_html() -> str:
           .replace(/'/g, "&#039;");
       }
 
-      function renderMarkdown(markdown) {
-        const lines = String(markdown || "").split(/\\r?\\n/);
-        const html = [];
-        let inList = false;
+      function sanitizeUrl(value) {
+        const candidate = String(value || "").trim();
+        if (!/^https?:\\/\\//i.test(candidate)) {
+          return null;
+        }
+        return escapeHtml(candidate);
+      }
 
-        const closeList = () => {
-          if (inList) {
-            html.push("</ul>");
-            inList = false;
+      function renderInlineMarkdown(text) {
+        const tokens = [];
+        const stashToken = (html) => {
+          const key = `@@MDTOKEN${tokens.length}@@`;
+          tokens.push(html);
+          return key;
+        };
+
+        let value = String(text || "");
+        value = value.replace(/`([^`]+)`/g, (_, code) => stashToken(`<code>${escapeHtml(code)}</code>`));
+        value = value.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, (_, label, href) => {
+          const safeHref = sanitizeUrl(href);
+          if (!safeHref) {
+            return label;
+          }
+          return stashToken(
+            `<a href="${safeHref}" target="_blank" rel="noreferrer noopener">${renderInlineMarkdown(label)}</a>`
+          );
+        });
+
+        let html = escapeHtml(value);
+        html = html.replace(/\\*\\*([^*]+)\\*\\*/g, "<strong>$1</strong>");
+        html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+        html = html.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+        html = html.replace(/(^|[^*])\\*([^*]+)\\*(?!\\*)/g, "$1<em>$2</em>");
+        html = html.replace(/(^|[^_])_([^_]+)_(?!_)/g, "$1<em>$2</em>");
+
+        return tokens.reduce((output, token, index) => {
+          const key = `@@MDTOKEN${index}@@`;
+          return output.split(key).join(token);
+        }, html);
+      }
+
+      function renderMarkdown(markdown) {
+        const lines = String(markdown || "").replace(/\\t/g, "    ").split(/\\r?\\n/);
+        if (!lines.some((line) => line.trim())) {
+          return '<div class="empty">No report content.</div>';
+        }
+
+        const html = [];
+        const listStack = [];
+        let paragraphLines = [];
+        let quoteLines = [];
+        let codeFence = null;
+        let codeLines = [];
+
+        const closeParagraph = () => {
+          if (!paragraphLines.length) {
+            return;
+          }
+          html.push(`<p>${renderInlineMarkdown(paragraphLines.join(" "))}</p>`);
+          paragraphLines = [];
+        };
+
+        const closeQuote = () => {
+          if (!quoteLines.length) {
+            return;
+          }
+          html.push(`<blockquote><p>${quoteLines.map((line) => renderInlineMarkdown(line)).join("<br>")}</p></blockquote>`);
+          quoteLines = [];
+        };
+
+        const closeCodeBlock = () => {
+          if (codeFence === null) {
+            return;
+          }
+          const languageClass = /^[a-z0-9_-]+$/i.test(codeFence) ? ` class="language-${codeFence}"` : "";
+          html.push(`<pre><code${languageClass}>${escapeHtml(codeLines.join("\\n"))}</code></pre>`);
+          codeFence = null;
+          codeLines = [];
+        };
+
+        const closeListLevel = () => {
+          const current = listStack.pop();
+          if (!current) {
+            return;
+          }
+          if (current.liOpen) {
+            html.push("</li>");
+          }
+          html.push(`</${current.type}>`);
+        };
+
+        const closeLists = () => {
+          while (listStack.length) {
+            closeListLevel();
           }
         };
 
-        for (const rawLine of lines) {
-          const line = rawLine.trimEnd();
-          if (!line.trim()) {
-            closeList();
-            continue;
-          }
-
-          if (line.startsWith("### ")) {
-            closeList();
-            html.push(`<h3>${escapeHtml(line.slice(4))}</h3>`);
-            continue;
-          }
-          if (line.startsWith("## ")) {
-            closeList();
-            html.push(`<h2>${escapeHtml(line.slice(3))}</h2>`);
-            continue;
-          }
-          if (line.startsWith("# ")) {
-            closeList();
-            html.push(`<h1>${escapeHtml(line.slice(2))}</h1>`);
-            continue;
-          }
-          if (line.startsWith("- ")) {
-            if (!inList) {
-              html.push("<ul>");
-              inList = true;
+        const prepareList = (indent, type) => {
+          while (listStack.length) {
+            const current = listStack[listStack.length - 1];
+            if (current.indent < indent) {
+              break;
             }
-            html.push(`<li>${escapeHtml(line.slice(2))}</li>`);
+            if (current.indent === indent && current.type === type) {
+              break;
+            }
+            closeListLevel();
+          }
+
+          const current = listStack[listStack.length - 1];
+          if (!current || current.indent < indent) {
+            html.push(`<${type}>`);
+            listStack.push({ type, indent, liOpen: false });
+          }
+        };
+
+        const flushBlocks = () => {
+          closeParagraph();
+          closeQuote();
+          closeLists();
+        };
+
+        for (const rawLine of lines) {
+          const line = rawLine.replace(/\\s+$/, "");
+          const trimmed = line.trim();
+
+          if (codeFence !== null) {
+            if (trimmed.startsWith("```")) {
+              closeCodeBlock();
+            } else {
+              codeLines.push(rawLine);
+            }
             continue;
           }
 
-          closeList();
-          html.push(`<p>${escapeHtml(line)}</p>`);
+          if (!trimmed) {
+            closeParagraph();
+            closeQuote();
+            closeLists();
+            continue;
+          }
+
+          if (trimmed.startsWith("```")) {
+            closeParagraph();
+            closeQuote();
+            closeLists();
+            codeFence = trimmed.slice(3).trim();
+            codeLines = [];
+            continue;
+          }
+
+          const headingMatch = trimmed.match(/^(#{1,3})\\s+(.*)$/);
+          if (headingMatch) {
+            flushBlocks();
+            const level = headingMatch[1].length;
+            html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+            continue;
+          }
+
+          if (/^(---|\\*\\*\\*|___)$/.test(trimmed)) {
+            flushBlocks();
+            html.push("<hr>");
+            continue;
+          }
+
+          const quoteMatch = line.match(/^\\s*>\\s?(.*)$/);
+          if (quoteMatch) {
+            closeParagraph();
+            closeLists();
+            quoteLines.push(quoteMatch[1]);
+            continue;
+          }
+
+          const listMatch = line.match(/^(\\s*)([-*+]|\\d+\\.)\\s+(.*)$/);
+          if (listMatch) {
+            closeParagraph();
+            closeQuote();
+            const indent = listMatch[1].length;
+            const marker = listMatch[2];
+            const type = /\\d+\\./.test(marker) ? "ol" : "ul";
+            prepareList(indent, type);
+            const current = listStack[listStack.length - 1];
+            if (current.liOpen) {
+              html.push("</li>");
+            }
+            html.push(`<li>${renderInlineMarkdown(listMatch[3])}`);
+            current.liOpen = true;
+            continue;
+          }
+
+          closeQuote();
+          closeLists();
+          paragraphLines.push(trimmed);
         }
-        closeList();
+
+        closeCodeBlock();
+        closeParagraph();
+        closeQuote();
+        closeLists();
         return html.join("");
       }
 
@@ -612,12 +798,18 @@ def _dashboard_html() -> str:
         document.getElementById("latestReport").textContent = summary.latest_report_date || "--";
         document.getElementById("latestMessageAt").textContent = formatDateTime(summary.latest_message_at);
         document.getElementById("hourlyReportsToday").textContent = summary.total_hourly_reports_today.toLocaleString();
-        document.getElementById("configuredChannelCount").textContent = `${summary.configured_channel_count || 0} configured channels`;
+        const configuredChannelCount = document.getElementById("configuredChannelCount");
+        if (configuredChannelCount) {
+          configuredChannelCount.textContent = `${summary.configured_channel_count || 0} configured channels`;
+        }
         renderTargets(summary.configured_regions || []);
       }
 
       function renderTargets(regions) {
         const root = document.getElementById("targetTree");
+        if (!root) {
+          return;
+        }
         if (!regions.length) {
           root.innerHTML = '<div class="empty" style="padding:24px 12px;">No named region/channel configuration found. The collector will fall back to flat guild and channel IDs.</div>';
           return;

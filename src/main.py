@@ -13,6 +13,7 @@ def main() -> None:
         choices=[
             "bot",
             "api",
+            "flask-web",
             "init-db",
             "daily-report-worker",
             "daily-report-once",
@@ -33,6 +34,10 @@ def main() -> None:
     elif args.command == "api":
         from .api.app import run_web
         run_web(config_path=args.config)
+    elif args.command == "flask-web":
+        from .web.flask_app import run_web as run_flask_web
+
+        run_flask_web(config_path=args.config)
     elif args.command == "init-db":
         from .common.config import load_config
         from .storage import init_db
