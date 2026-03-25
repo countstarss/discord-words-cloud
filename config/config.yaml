@@ -18,6 +18,10 @@ targets:
   guild_ids: ${DISCORD_GUILD_IDS:}
   # Specific channel IDs to collect from (leave empty for all)
   channel_ids: ${DISCORD_CHANNEL_IDS:}
+  # Advanced mode: define named regions and channels in one structure.
+  # Example env value:
+  # DISCORD_REGION_CHANNELS=[{"key":"cn","name":"中国","guild_id":1283101973045841952,"channels":[{"id":1400146275512352799,"name":"频道标题1"}]}]
+  regions: ${DISCORD_REGION_CHANNELS:[]}
 
 # Collector settings
 collector:

@@ -39,7 +39,35 @@ DB_PASSWORD=your_password
 DISCORD_BOT_TOKEN=your_discord_bot_token
 ```
 
-Edit `config/config.yaml` to configure targets:
+For future multi-region, multi-channel collection, we recommend configuring named region groups directly in `.env`:
+
+```env
+DISCORD_REGION_CHANNELS=[
+  {"key":"cn","name":"中国","guild_id":1283101973045841952,"channels":[
+    {"id":1400146275512352799,"name":"频道标题1"},
+    {"id":1400146275512352800,"name":"频道标题2"},
+    {"id":1400146275512352801,"name":"频道标题3"}
+  ]},
+  {"key":"th","name":"泰国","guild_id":1483900000000000000,"channels":[
+    {"id":1483900000000000001,"name":"频道标题1"},
+    {"id":1483900000000000002,"name":"频道标题2"},
+    {"id":1483900000000000003,"name":"频道标题3"}
+  ]}
+]
+```
+
+This will be normalized into a grouped target map for the collector and dashboard:
+
+- 中国
+  - 频道标题1
+  - 频道标题2
+  - 频道标题3
+- 泰国
+  - 频道标题1
+  - 频道标题2
+  - 频道标题3
+
+The legacy flat configuration still works if you only want raw IDs:
 
 ```yaml
 targets:
@@ -111,3 +139,10 @@ python3 -m src.main daily-report-once --now
 ## Configuration
 
 See `config/config.yaml` for all configuration options.
+
+Target configuration notes:
+
+- `DISCORD_REGION_CHANNELS` is the recommended future-proof option when you need multiple regions and named channels.
+- Each region supports `key`, `name`, `guild_id` or `guild_ids`, and a `channels` list.
+- Each channel supports `id`, `name`, and optional `guild_id` or `guild_ids`.
+- `TARGET_GUILD_IDS` and `TARGET_CHANNEL_IDS` still work and are automatically mapped into the new normalized target structure.

@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import discord
 
@@ -137,6 +137,12 @@ class DiscordCollector(discord.Client):
 
         self.target_guilds: Optional[Set[int]] = self._parse_id_set(guild_ids)
         self.target_channels: Optional[Set[int]] = self._parse_id_set(channel_ids)
+        self.target_regions: List[dict[str, Any]] = list(targets.get("regions", []) or [])
+        self.channel_registry: Dict[int, dict[str, Any]] = {
+            int(channel_id): dict(metadata)
+            for channel_id, metadata in (targets.get("channel_registry", {}) or {}).items()
+            if str(channel_id).strip()
+        }
 
         collector_cfg = config.get("collector", {})
         backfill_cfg = collector_cfg.get("backfill", {})
@@ -231,6 +237,30 @@ class DiscordCollector(discord.Client):
         except Exception:
             return default
 
+    def _format_target_groups(self) -> list[str]:
+        if not self.target_regions:
+            return []
+
+        lines: list[str] = []
+        for region in self.target_regions:
+            region_name = str(region.get("name") or region.get("key") or "Region").strip()
+            lines.append(region_name)
+            for channel in region.get("channels") or []:
+                channel_id = channel.get("id")
+                channel_name = str(channel.get("name") or f"channel {channel_id}").strip()
+                lines.append(f"  - {channel_name} ({channel_id})")
+        return lines
+
+    def _infer_channel_group(self, channel_name: str) -> str:
+        lowered = channel_name.strip().lower()
+        if any(token in lowered for token in ["bug", "报错", "report-bugs", "error"]):
+            return "bug"
+        if any(token in lowered for token in ["反馈", "suggest", "feedback"]):
+            return "feedback"
+        if "nsfw" in lowered:
+            return "nsfw"
+        return "chat"
+
     # MARK: - Filtering
     def _should_process(self, message: discord.Message) -> bool:
         if message.author.bot:
@@ -275,12 +305,28 @@ class DiscordCollector(discord.Client):
 
         created_at = message.created_at or datetime.now(timezone.utc)
         now = datetime.now(timezone.utc)
+        channel_id = int(message.channel.id)
+        channel_meta = self.channel_registry.get(channel_id, {})
+        channel_name = str(
+            channel_meta.get("channel_name")
+            or getattr(message.channel, "name", "")
+            or f"channel {channel_id}"
+        ).strip()
+        region_key = str(channel_meta.get("region_key") or "default").strip()
+        region_name = str(channel_meta.get("region_name") or "Default").strip()
+        channel_group = str(channel_meta.get("channel_group") or self._infer_channel_group(channel_name)).strip()
+        scope_key = f"{region_key}:{channel_id}"
 
         return {
             "message_id": int(message.id),
             "guild_id": int(message.guild.id if message.guild else 0),
-            "channel_id": int(message.channel.id),
+            "channel_id": channel_id,
             "author_id": int(message.author.id),
+            "region_key": region_key,
+            "region_name": region_name,
+            "channel_name": channel_name,
+            "channel_group": channel_group,
+            "scope_key": scope_key,
             "content": message.content,
             "is_target_language": bool(is_target),
             "language": lang,
@@ -303,6 +349,8 @@ class DiscordCollector(discord.Client):
         print(f"Connected guilds: {len(self.guilds)}")
         print(f"Target guild IDs: {sorted(self.target_guilds) if self.target_guilds else 'ALL'}")
         print(f"Target channel IDs: {sorted(self.target_channels) if self.target_channels else 'ALL'}")
+        for line in self._format_target_groups():
+            print(f"[collector-targets] {line}")
         if self.target_channels is None:
             print("[collector] no target channel configured; live collection is currently reading ALL visible channels")
         print(f"[collector] backfill enabled={self.backfill_enabled} limit_per_channel={self.backfill_limit_per_channel}")

@@ -15,6 +15,32 @@ from ..storage import get_db, init_db
 app = FastAPI(title="Rubii Words Cloud", version="0.1.0")
 
 
+def _configured_regions() -> list[dict]:
+    config = load_config()
+    targets = config.get("targets", {})
+    regions = []
+    for region in targets.get("regions", []) or []:
+        channels = []
+        for channel in region.get("channels", []) or []:
+            channels.append(
+                {
+                    "id": int(channel.get("id")),
+                    "name": str(channel.get("name") or f"channel {channel.get('id')}").strip(),
+                    "group": str(channel.get("group") or "").strip(),
+                    "guild_ids": [int(item) for item in channel.get("guild_ids", []) or []],
+                }
+            )
+        regions.append(
+            {
+                "key": str(region.get("key") or ""),
+                "name": str(region.get("name") or region.get("key") or "Region").strip(),
+                "guild_ids": [int(item) for item in region.get("guild_ids", []) or []],
+                "channels": channels,
+            }
+        )
+    return regions
+
+
 def _dashboard_html() -> str:
     return """
 <!doctype html>
@@ -252,6 +278,60 @@ def _dashboard_html() -> str:
         line-height: 1.6;
       }
 
+      .target-tree {
+        margin-top: 14px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(245,249,253,0.92));
+        padding: 12px;
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+      }
+
+      .target-tree.compact {
+        flex: 0 0 auto;
+      }
+
+      .target-region + .target-region {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid var(--line);
+      }
+
+      .target-region-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 8px;
+        letter-spacing: 0.01em;
+      }
+
+      .target-channel {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: rgba(255,255,255,0.7);
+      }
+
+      .target-channel + .target-channel {
+        margin-top: 8px;
+      }
+
+      .target-channel-name {
+        font-size: 13px;
+        color: #1f2937;
+      }
+
+      .target-channel-id {
+        font-size: 11px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
       .report-shell {
         border: 1px solid var(--line);
         border-radius: 20px;
@@ -417,11 +497,15 @@ def _dashboard_html() -> str:
           </div>
 
           <div class="snapshot-note">
-            <span>Report Focus</span>
-            <strong>High-signal monitoring only</strong>
+            <span>Configured Coverage</span>
+            <strong id="configuredChannelCount">-- configured channels</strong>
             <p>
-              The dashboard hides raw message previews here and keeps the page focused on collection volume, report counts, and the selected daily report.
+              Regions and channel aliases come from your .env configuration, so we can keep future per-channel reports readable in the dashboard.
             </p>
+          </div>
+
+          <div class="target-tree" id="targetTree">
+            <div class="empty" style="padding:24px 12px;">Loading region and channel map...</div>
           </div>
         </div>
 
@@ -527,6 +611,30 @@ def _dashboard_html() -> str:
         document.getElementById("latestReport").textContent = summary.latest_report_date || "--";
         document.getElementById("latestMessageAt").textContent = formatDateTime(summary.latest_message_at);
         document.getElementById("targetRatio").textContent = `${summary.target_language_ratio_24h.toFixed(1)}%`;
+        document.getElementById("configuredChannelCount").textContent = `${summary.configured_channel_count || 0} configured channels`;
+        renderTargets(summary.configured_regions || []);
+      }
+
+      function renderTargets(regions) {
+        const root = document.getElementById("targetTree");
+        if (!regions.length) {
+          root.innerHTML = '<div class="empty" style="padding:24px 12px;">No named region/channel configuration found. The collector will fall back to flat guild and channel IDs.</div>';
+          return;
+        }
+
+        root.innerHTML = regions
+          .map((region) => `
+            <section class="target-region">
+              <div class="target-region-title">${escapeHtml(region.name)}</div>
+              ${(region.channels || []).map((channel) => `
+                <div class="target-channel">
+                  <div class="target-channel-name">${escapeHtml(channel.name)}</div>
+                  <div class="target-channel-id">${escapeHtml(String(channel.id))}</div>
+                </div>
+              `).join("")}
+            </section>
+          `)
+          .join("");
       }
 
       function syncReportSelector() {
@@ -633,6 +741,11 @@ def get_messages(
                 "guild_id": m.guild_id,
                 "channel_id": m.channel_id,
                 "author_id": m.author_id,
+                "region_key": m.region_key,
+                "region_name": m.region_name,
+                "channel_name": m.channel_name,
+                "channel_group": m.channel_group,
+                "scope_key": m.scope_key,
                 "content": m.content,
                 "is_target_language": m.is_target_language,
                 "language": m.language,
@@ -659,6 +772,11 @@ def get_message(message_id: int) -> dict:
         "guild_id": message.guild_id,
         "channel_id": message.channel_id,
         "author_id": message.author_id,
+        "region_key": message.region_key,
+        "region_name": message.region_name,
+        "channel_name": message.channel_name,
+        "channel_group": message.channel_group,
+        "scope_key": message.scope_key,
         "content": message.content,
         "is_target_language": message.is_target_language,
         "language": message.language,
@@ -694,6 +812,7 @@ def get_dashboard() -> dict:
     reports = db.get_all_daily_reports()
     latest_report = reports[0] if reports else None
     hourly_count_today = db.count_hourly_reports(date.today())
+    regions = _configured_regions()
     return {
         "total_messages": db.count_messages(),
         "total_reports": len(reports),
@@ -702,6 +821,8 @@ def get_dashboard() -> dict:
         "target_language_ratio_24h": stats.get("target_language_ratio", 0.0),
         "latest_message_at": stats.get("last_message_at"),
         "latest_report_date": latest_report.report_date.isoformat() if latest_report else None,
+        "configured_channel_count": sum(len(region.get("channels", [])) for region in regions),
+        "configured_regions": regions,
     }
 
 
