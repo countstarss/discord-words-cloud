@@ -70,6 +70,16 @@ class Database:
             alter_statements.append("ALTER TABLE messages ADD COLUMN is_duplicate BOOLEAN NOT NULL DEFAULT FALSE")
         if "quality_score" not in existing_columns:
             alter_statements.append("ALTER TABLE messages ADD COLUMN quality_score DOUBLE PRECISION NOT NULL DEFAULT 1.0")
+        if "region_key" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN region_key VARCHAR(64) NOT NULL DEFAULT 'default'")
+        if "region_name" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN region_name VARCHAR(128) NOT NULL DEFAULT ''")
+        if "channel_name" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN channel_name VARCHAR(255) NOT NULL DEFAULT ''")
+        if "channel_group" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN channel_group VARCHAR(64) NOT NULL DEFAULT 'chat'")
+        if "scope_key" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN scope_key VARCHAR(255) NOT NULL DEFAULT 'default:0'")
 
         index_statements: list[str] = []
         if "content_hash" in existing_columns or any("content_hash" in stmt for stmt in alter_statements):
@@ -78,6 +88,15 @@ class Database:
         if "is_duplicate" in existing_columns or any("is_duplicate" in stmt for stmt in alter_statements):
             if "ix_messages_is_duplicate" not in existing_indexes:
                 index_statements.append("CREATE INDEX IF NOT EXISTS ix_messages_is_duplicate ON messages (is_duplicate)")
+        if "region_key" in existing_columns or any("region_key" in stmt for stmt in alter_statements):
+            if "ix_messages_region_key" not in existing_indexes:
+                index_statements.append("CREATE INDEX IF NOT EXISTS ix_messages_region_key ON messages (region_key)")
+        if "channel_group" in existing_columns or any("channel_group" in stmt for stmt in alter_statements):
+            if "ix_messages_channel_group" not in existing_indexes:
+                index_statements.append("CREATE INDEX IF NOT EXISTS ix_messages_channel_group ON messages (channel_group)")
+        if "scope_key" in existing_columns or any("scope_key" in stmt for stmt in alter_statements):
+            if "ix_messages_scope_key" not in existing_indexes:
+                index_statements.append("CREATE INDEX IF NOT EXISTS ix_messages_scope_key ON messages (scope_key)")
         if {"content_hash", "is_duplicate"}.issubset(existing_columns) or (
             any("content_hash" in stmt for stmt in alter_statements)
             and any("is_duplicate" in stmt for stmt in alter_statements)
@@ -107,6 +126,15 @@ class Database:
             raise
         finally:
             db.close()
+
+    def _normalize_report_scope_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(payload)
+        normalized.setdefault("scope_type", "global")
+        normalized.setdefault("scope_key", "global")
+        normalized.setdefault("region_key", "__all__")
+        normalized.setdefault("channel_id", 0)
+        normalized.setdefault("channel_name", "")
+        return normalized
 
     # MARK: - Message CRUD
     def upsert_message(self, payload: Dict[str, Any]) -> bool:
@@ -162,6 +190,10 @@ class Database:
         self,
         window_start: datetime,
         window_end: datetime,
+        region_key: Optional[str] = None,
+        channel_id: Optional[int] = None,
+        channel_group: Optional[str] = None,
+        scope_key: Optional[str] = None,
     ) -> List[Message]:
         with self.session() as db:
             stmt = (
@@ -171,6 +203,14 @@ class Database:
                 .where(Message.created_at < window_end)
                 .order_by(Message.created_at.asc())
             )
+            if region_key:
+                stmt = stmt.where(Message.region_key == region_key)
+            if channel_id:
+                stmt = stmt.where(Message.channel_id == channel_id)
+            if channel_group:
+                stmt = stmt.where(Message.channel_group == channel_group)
+            if scope_key:
+                stmt = stmt.where(Message.scope_key == scope_key)
             return list(db.scalars(stmt))
 
     def get_message_by_id(self, message_id: int) -> Optional[Message]:
@@ -207,8 +247,14 @@ class Database:
 
     # MARK: - Daily Report CRUD
     def upsert_daily_report(self, payload: Dict[str, Any]) -> DailyReport:
+        payload = self._normalize_report_scope_payload(payload)
         with self.session() as db:
-            stmt = select(DailyReport).where(DailyReport.report_date == payload["report_date"])
+            stmt = (
+                select(DailyReport)
+                .where(DailyReport.report_date == payload["report_date"])
+                .where(DailyReport.timezone == payload["timezone"])
+                .where(DailyReport.scope_key == payload["scope_key"])
+            )
             existing = db.scalar(stmt)
             if existing is None:
                 existing = DailyReport(**payload)
@@ -223,29 +269,39 @@ class Database:
             db.flush()
             return existing
 
-    def get_daily_report_by_date(self, report_date: date) -> Optional[DailyReport]:
+    def get_daily_report_by_date(self, report_date: date, scope_key: str = "global") -> Optional[DailyReport]:
         with self.session() as db:
-            stmt = select(DailyReport).where(DailyReport.report_date == report_date)
+            stmt = (
+                select(DailyReport)
+                .where(DailyReport.report_date == report_date)
+                .where(DailyReport.scope_key == scope_key)
+            )
             return db.scalar(stmt)
 
-    def get_all_daily_reports(self) -> List[DailyReport]:
+    def get_all_daily_reports(self, scope_key: str = "global") -> List[DailyReport]:
         with self.session() as db:
-            stmt = select(DailyReport).order_by(desc(DailyReport.report_date))
+            stmt = (
+                select(DailyReport)
+                .where(DailyReport.scope_key == scope_key)
+                .order_by(desc(DailyReport.report_date))
+            )
             return list(db.scalars(stmt))
 
-    def count_daily_reports(self) -> int:
+    def count_daily_reports(self, scope_key: str = "global") -> int:
         with self.session() as db:
-            stmt = select(func.count()).select_from(DailyReport)
+            stmt = select(func.count()).select_from(DailyReport).where(DailyReport.scope_key == scope_key)
             return int(db.scalar(stmt) or 0)
 
     # MARK: - Hourly Report CRUD
     def upsert_hourly_report(self, payload: Dict[str, Any]) -> HourlyReport:
+        payload = self._normalize_report_scope_payload(payload)
         with self.session() as db:
             stmt = (
                 select(HourlyReport)
                 .where(HourlyReport.window_start == payload["window_start"])
                 .where(HourlyReport.window_end == payload["window_end"])
                 .where(HourlyReport.timezone == payload["timezone"])
+                .where(HourlyReport.scope_key == payload["scope_key"])
             )
             existing = db.scalar(stmt)
             if existing is None:
@@ -266,6 +322,7 @@ class Database:
         window_start: datetime,
         window_end: datetime,
         timezone_name: str = "Asia/Shanghai",
+        scope_key: str = "global",
     ) -> Optional[HourlyReport]:
         with self.session() as db:
             stmt = (
@@ -273,21 +330,23 @@ class Database:
                 .where(HourlyReport.window_start == window_start)
                 .where(HourlyReport.window_end == window_end)
                 .where(HourlyReport.timezone == timezone_name)
+                .where(HourlyReport.scope_key == scope_key)
             )
             return db.scalar(stmt)
 
-    def get_hourly_reports_for_date(self, report_date: date) -> List[HourlyReport]:
+    def get_hourly_reports_for_date(self, report_date: date, scope_key: str = "global") -> List[HourlyReport]:
         with self.session() as db:
             stmt = (
                 select(HourlyReport)
                 .where(HourlyReport.report_date == report_date)
+                .where(HourlyReport.scope_key == scope_key)
                 .order_by(HourlyReport.window_start.asc())
             )
             return list(db.scalars(stmt))
 
-    def count_hourly_reports(self, report_date: Optional[date] = None) -> int:
+    def count_hourly_reports(self, report_date: Optional[date] = None, scope_key: str = "global") -> int:
         with self.session() as db:
-            stmt = select(func.count()).select_from(HourlyReport)
+            stmt = select(func.count()).select_from(HourlyReport).where(HourlyReport.scope_key == scope_key)
             if report_date is not None:
                 stmt = stmt.where(HourlyReport.report_date == report_date)
             return int(db.scalar(stmt) or 0)
