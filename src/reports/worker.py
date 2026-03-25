@@ -88,7 +88,7 @@ def run_daily_report_worker(config_path: Optional[str] = None) -> None:
     local_now = datetime.now(tz=SHANGHAI_TZ)
 
     yesterday = local_now.date() - timedelta(days=1)
-    missing_daily_scope = any(service.get_daily_report(yesterday, scope_key=scope.scope_key) is None for scope in service.scopes)
+    missing_daily_scope = any(service.get_daily_report(yesterday, scope_key=scope.scope_key) is None for scope in service.iter_daily_scopes())
     if missing_daily_scope and local_now.time() >= dt_time(hour=0, minute=20):
         print(f"[worker] backfill daily {yesterday.isoformat()}")
         _run_previous_day_daily_job(service)

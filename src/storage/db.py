@@ -365,6 +365,17 @@ class Database:
             )
             return list(db.scalars(stmt))
 
+    def get_hourly_reports_for_date_by_region(self, report_date: date, region_key: str) -> List[HourlyReport]:
+        with self.session() as db:
+            stmt = (
+                select(HourlyReport)
+                .where(HourlyReport.report_date == report_date)
+                .where(HourlyReport.region_key == region_key)
+                .where(HourlyReport.scope_type == "channel")
+                .order_by(HourlyReport.window_start.asc(), HourlyReport.scope_key.asc())
+            )
+            return list(db.scalars(stmt))
+
     def count_hourly_reports(self, report_date: Optional[date] = None, scope_key: str = "global") -> int:
         with self.session() as db:
             stmt = select(func.count()).select_from(HourlyReport).where(HourlyReport.scope_key == scope_key)
