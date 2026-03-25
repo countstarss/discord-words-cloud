@@ -484,16 +484,16 @@ def _dashboard_html() -> str:
               <strong id="latestMessageAt">--</strong>
             </div>
             <div class="mini-card">
-              <label>24h Target Ratio</label>
-              <strong id="targetRatio">--</strong>
+              <label>Today Hourly Reports</label>
+              <strong id="hourlyReportsToday">--</strong>
             </div>
             <div class="mini-card">
               <label>Current Report Messages</label>
               <strong id="reportMessages">--</strong>
             </div>
             <div class="mini-card">
-              <label>Current Report Target</label>
-              <strong id="reportTargetMessages">--</strong>
+              <label>Current Report Candidates</label>
+              <strong id="reportCandidateMessages">--</strong>
             </div>
           </div>
 
@@ -518,7 +518,7 @@ def _dashboard_html() -> str:
                 <span id="reportWindow">--</span>
               </div>
               <div style="text-align:right">
-                <span>Source / Target</span>
+                <span>Messages / Candidates</span>
                 <strong id="reportCounts">--</strong>
               </div>
             </div>
@@ -611,7 +611,7 @@ def _dashboard_html() -> str:
         document.getElementById("activeUsers").textContent = summary.active_users_24h.toLocaleString();
         document.getElementById("latestReport").textContent = summary.latest_report_date || "--";
         document.getElementById("latestMessageAt").textContent = formatDateTime(summary.latest_message_at);
-        document.getElementById("targetRatio").textContent = `${summary.target_language_ratio_24h.toFixed(1)}%`;
+        document.getElementById("hourlyReportsToday").textContent = summary.total_hourly_reports_today.toLocaleString();
         document.getElementById("configuredChannelCount").textContent = `${summary.configured_channel_count || 0} configured channels`;
         renderTargets(summary.configured_regions || []);
       }
@@ -660,16 +660,16 @@ def _dashboard_html() -> str:
           document.getElementById("reportWindow").textContent = "--";
           document.getElementById("reportCounts").textContent = "--";
           document.getElementById("reportMessages").textContent = "--";
-          document.getElementById("reportTargetMessages").textContent = "--";
+          document.getElementById("reportCandidateMessages").textContent = "--";
           body.innerHTML = '<div class="empty">No report available.</div>';
           return;
         }
 
         document.getElementById("reportTitle").textContent = `Daily Report · ${report.report_date}`;
         document.getElementById("reportWindow").textContent = `${formatDateTime(report.window_start)} → ${formatDateTime(report.window_end)}`;
-        document.getElementById("reportCounts").textContent = `${report.source_message_count} / ${report.target_message_count}`;
+        document.getElementById("reportCounts").textContent = `${report.source_message_count} / ${report.candidate_message_count}`;
         document.getElementById("reportMessages").textContent = report.source_message_count.toLocaleString();
-        document.getElementById("reportTargetMessages").textContent = report.target_message_count.toLocaleString();
+        document.getElementById("reportCandidateMessages").textContent = report.candidate_message_count.toLocaleString();
         body.innerHTML = renderMarkdown(report.content_cn);
       }
 
@@ -727,13 +727,13 @@ def status(hours: int = Query(default=24, ge=1, le=168)) -> dict:
 def get_messages(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
-    target_language_only: bool = Query(default=False),
+    scope_key: Optional[str] = Query(default=None),
 ) -> dict:
     db = get_db()
     messages = db.get_all_messages(
         limit=limit,
         offset=offset,
-        target_language_only=target_language_only,
+        scope_key=scope_key,
     )
     return {
         "messages": [
@@ -748,9 +748,8 @@ def get_messages(
                 "channel_group": m.channel_group,
                 "scope_key": m.scope_key,
                 "content": m.content,
-                "is_target_language": m.is_target_language,
-                "language": m.language,
-                "lang_confidence": m.lang_confidence,
+                "detected_language": m.detected_language,
+                "detected_language_confidence": m.detected_language_confidence,
                 "cleaned_text": m.cleaned_text,
                 "quality_score": m.quality_score,
                 "created_at": m.created_at.isoformat() if m.created_at else None,
@@ -779,9 +778,8 @@ def get_message(message_id: int) -> dict:
         "channel_group": message.channel_group,
         "scope_key": message.scope_key,
         "content": message.content,
-        "is_target_language": message.is_target_language,
-        "language": message.language,
-        "lang_confidence": message.lang_confidence,
+        "detected_language": message.detected_language,
+        "detected_language_confidence": message.detected_language_confidence,
         "cleaned_text": message.cleaned_text,
         "tokens": message.tokens,
         "quality_score": message.quality_score,
@@ -794,16 +792,11 @@ def get_message(message_id: int) -> dict:
 @app.get("/api/stats")
 def get_stats(
     hours: int = Query(default=24, ge=1, le=168),
-    target_language_only: bool = Query(default=False),
+    scope_key: Optional[str] = Query(default=None),
 ) -> dict:
     db = get_db()
-    stats = db.get_stats(hours=hours)
-    
-    if target_language_only:
-        stats["total_messages"] = db.count_messages(target_language_only=True)
-        stats["target_language_only"] = True
-    
-    return stats
+    del scope_key
+    return db.get_stats(hours=hours)
 
 
 @app.get("/api/dashboard")
@@ -819,7 +812,7 @@ def get_dashboard() -> dict:
         "total_reports": len(reports),
         "total_hourly_reports_today": hourly_count_today,
         "active_users_24h": stats.get("active_users", 0),
-        "target_language_ratio_24h": stats.get("target_language_ratio", 0.0),
+        "detected_language_breakdown_24h": stats.get("detected_language_breakdown", []),
         "latest_message_at": stats.get("last_message_at"),
         "latest_report_date": latest_report.report_date.isoformat() if latest_report else None,
         "configured_channel_count": sum(len(region.get("channels", [])) for region in regions),
@@ -860,7 +853,7 @@ def get_daily_reports(scope_key: str = Query(default="global")) -> dict:
                 "window_end": report.window_end.isoformat(),
                 "generated_at": report.generated_at.isoformat(),
                 "source_message_count": report.source_message_count,
-                "target_message_count": report.target_message_count,
+                "candidate_message_count": report.candidate_message_count,
                 "content_cn": report.content_cn,
             }
             for report in reports

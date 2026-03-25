@@ -62,6 +62,7 @@ class Database:
 
         existing_columns = {column["name"] for column in inspector.get_columns("messages")}
         existing_indexes = {index["name"] for index in inspector.get_indexes("messages")}
+        daily_columns = {column["name"] for column in inspector.get_columns("daily_reports")} if "daily_reports" in table_names else set()
 
         alter_statements: list[str] = []
         if "content_hash" not in existing_columns:
@@ -70,6 +71,12 @@ class Database:
             alter_statements.append("ALTER TABLE messages ADD COLUMN is_duplicate BOOLEAN NOT NULL DEFAULT FALSE")
         if "quality_score" not in existing_columns:
             alter_statements.append("ALTER TABLE messages ADD COLUMN quality_score DOUBLE PRECISION NOT NULL DEFAULT 1.0")
+        if "detected_language" not in existing_columns:
+            alter_statements.append("ALTER TABLE messages ADD COLUMN detected_language VARCHAR(32) NOT NULL DEFAULT 'unknown'")
+        if "detected_language_confidence" not in existing_columns:
+            alter_statements.append(
+                "ALTER TABLE messages ADD COLUMN detected_language_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0"
+            )
         if "region_key" not in existing_columns:
             alter_statements.append("ALTER TABLE messages ADD COLUMN region_key VARCHAR(64) NOT NULL DEFAULT 'default'")
         if "region_name" not in existing_columns:
@@ -91,6 +98,11 @@ class Database:
         if "region_key" in existing_columns or any("region_key" in stmt for stmt in alter_statements):
             if "ix_messages_region_key" not in existing_indexes:
                 index_statements.append("CREATE INDEX IF NOT EXISTS ix_messages_region_key ON messages (region_key)")
+        if "detected_language" in existing_columns or any("detected_language" in stmt for stmt in alter_statements):
+            if "ix_messages_detected_language" not in existing_indexes:
+                index_statements.append(
+                    "CREATE INDEX IF NOT EXISTS ix_messages_detected_language ON messages (detected_language)"
+                )
         if "channel_group" in existing_columns or any("channel_group" in stmt for stmt in alter_statements):
             if "ix_messages_channel_group" not in existing_indexes:
                 index_statements.append("CREATE INDEX IF NOT EXISTS ix_messages_channel_group ON messages (channel_group)")
@@ -107,12 +119,21 @@ class Database:
                 )
 
         if not alter_statements and not index_statements:
-            return
+            daily_statements: list[str] = []
+        else:
+            daily_statements = []
+
+        if "daily_reports" in table_names and "candidate_message_count" not in daily_columns:
+            daily_statements.append(
+                "ALTER TABLE daily_reports ADD COLUMN candidate_message_count INTEGER NOT NULL DEFAULT 0"
+            )
 
         with self.engine.begin() as conn:
             for statement in alter_statements:
                 conn.execute(text(statement))
             for statement in index_statements:
+                conn.execute(text(statement))
+            for statement in daily_statements:
                 conn.execute(text(statement))
 
     @contextmanager
@@ -168,7 +189,7 @@ class Database:
         window_end: datetime,
         exclude_duplicates: bool = False,
         min_quality: float = 0.0,
-        target_language_only: bool = False,
+        scope_key: Optional[str] = None,
     ) -> List[Message]:
         with self.session() as db:
             stmt = (
@@ -177,12 +198,12 @@ class Database:
                 .where(Message.created_at >= window_start)
                 .where(Message.created_at < window_end)
             )
-            if target_language_only:
-                stmt = stmt.where(Message.is_target_language.is_(True))
             if exclude_duplicates:
                 stmt = stmt.where(Message.is_duplicate.is_(False))
             if min_quality > 0:
                 stmt = stmt.where(Message.quality_score >= min_quality)
+            if scope_key:
+                stmt = stmt.where(Message.scope_key == scope_key)
             stmt = stmt.order_by(Message.created_at.asc())
             return list(db.scalars(stmt))
 
@@ -221,7 +242,7 @@ class Database:
         self,
         limit: int = 100,
         offset: int = 0,
-        target_language_only: bool = False,
+        scope_key: Optional[str] = None,
     ) -> List[Message]:
         with self.session() as db:
             stmt = (
@@ -231,18 +252,18 @@ class Database:
                 .limit(limit)
                 .offset(offset)
             )
-            if target_language_only:
-                stmt = stmt.where(Message.is_target_language.is_(True))
+            if scope_key:
+                stmt = stmt.where(Message.scope_key == scope_key)
             return list(db.scalars(stmt))
 
     def count_messages(
         self,
-        target_language_only: bool = False,
+        scope_key: Optional[str] = None,
     ) -> int:
         with self.session() as db:
             stmt = select(func.count()).select_from(Message).where(Message.is_deleted.is_(False))
-            if target_language_only:
-                stmt = stmt.where(Message.is_target_language.is_(True))
+            if scope_key:
+                stmt = stmt.where(Message.scope_key == scope_key)
             return int(db.scalar(stmt) or 0)
 
     # MARK: - Daily Report CRUD
@@ -359,11 +380,7 @@ class Database:
         with self.session() as db:
             total = db.scalar(
                 select(func.count()).select_from(Message)
-                .where(Message.created_at >= cutoff)
-            ) or 0
-            target_lang = db.scalar(
-                select(func.count()).select_from(Message)
-                .where(Message.created_at >= cutoff, Message.is_target_language.is_(True))
+                .where(Message.created_at >= cutoff, Message.is_deleted.is_(False))
             ) or 0
             deleted = db.scalar(
                 select(func.count()).select_from(Message)
@@ -375,14 +392,25 @@ class Database:
                 .where(Message.is_deleted.is_(False))
             ) or 0
             last_message = db.scalar(select(func.max(Message.created_at)))
+            detected_languages = list(
+                db.execute(
+                    select(Message.detected_language, func.count())
+                    .where(Message.created_at >= cutoff, Message.is_deleted.is_(False))
+                    .group_by(Message.detected_language)
+                    .order_by(func.count().desc(), Message.detected_language.asc())
+                    .limit(8)
+                )
+            )
 
         return {
             "hours": hours,
             "total_messages": int(total),
-            "target_language_messages": int(target_lang),
             "deleted_messages": int(deleted),
             "active_users": int(active_users),
-            "target_language_ratio": float((target_lang / total) * 100) if total else 0.0,
+            "detected_language_breakdown": [
+                {"language": str(language or "unknown"), "count": int(count or 0)}
+                for language, count in detected_languages
+            ],
             "last_message_at": last_message.isoformat() if last_message else None,
         }
 

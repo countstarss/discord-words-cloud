@@ -58,6 +58,45 @@ class FakeTranslator:
             return "# 每日报告\n\n- 已根据 hourly_reports JSON 生成中文报告。"
         return render_daily_markdown(summary)
 
+    def summarize_channel_text_shard(self, shard: dict, scope: ReportScope, report_date: date) -> str:
+        return (
+            f"{scope.display_name} 子报告 {report_date.isoformat()}："
+            f"候选 {shard['stats']['candidate_count']} 条，"
+            f"消息 {shard['stats']['message_count']} 条。"
+        )
+
+    def merge_channel_text_reports(
+        self,
+        *,
+        scope: ReportScope,
+        report_date: date,
+        window_start: datetime,
+        window_end: datetime,
+        shard_reports: list[str],
+        source_message_count: int,
+        candidate_message_count: int,
+        active_user_count: int,
+        max_batch_chars: int = 18_000,
+        depth: int = 0,
+    ) -> str:
+        del window_start, window_end, max_batch_chars, depth
+        return (
+            f"{scope.display_name} {report_date.isoformat()} 中文日报\n"
+            f"总消息 {source_message_count} 条，候选 {candidate_message_count} 条，活跃用户 {active_user_count} 人。\n"
+            + "\n".join(shard_reports)
+        )
+
+
+class FlakyTranslator(FakeTranslator):
+    def __init__(self) -> None:
+        self._failed_once = False
+
+    def summarize_signal_shard(self, shard: dict) -> dict:
+        if not self._failed_once and len(shard.get("items", [])) > 1:
+            self._failed_once = True
+            raise RuntimeError("LLM response did not contain text content")
+        return super().summarize_signal_shard(shard)
+
 
 def _make_db(tmp_path) -> Database:
     db_path = tmp_path / "daily_reports.sqlite3"
@@ -70,7 +109,7 @@ def _message_payload(
     message_id: int,
     content: str,
     created_at: datetime,
-    is_target_language: bool,
+    detected_language: str = "th",
     *,
     channel_id: int = 10,
     region_key: str = "default",
@@ -89,9 +128,8 @@ def _message_payload(
         "channel_group": channel_group,
         "scope_key": f"{region_key}:{channel_id}",
         "content": content,
-        "is_target_language": is_target_language,
-        "language": "th" if is_target_language else "other",
-        "lang_confidence": 0.9 if is_target_language else 0.1,
+        "detected_language": detected_language,
+        "detected_language_confidence": 0.9,
         "cleaned_text": content,
         "tokens": [],
         "event_type": "create",
@@ -114,7 +152,6 @@ def test_hourly_report_upsert_is_idempotent(tmp_path):
         "window_end": datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
         "content_json": {"urgent_issues": []},
         "source_message_count": 10,
-        "target_message_count": 7,
         "candidate_message_count": 6,
         "shard_count": 1,
         "generated_at": datetime(2026, 3, 23, 18, 1, tzinfo=timezone.utc),
@@ -141,7 +178,7 @@ def test_pipeline_filters_noise_and_shards_payload():
                 "channel_id": "10",
                 "content": "55",
                 "created_at": "2026-03-24T00:01:00Z",
-                "is_target_language": True,
+                "detected_language": "th",
                 "quality_score": 1.0,
             },
             {
@@ -149,7 +186,7 @@ def test_pipeline_filters_noise_and_shards_payload():
                 "channel_id": "10",
                 "content": "อัปเดตแล้วเปิดไม่ได้ ต้องลงใหม่ทุกครั้ง",
                 "created_at": "2026-03-24T00:02:00Z",
-                "is_target_language": True,
+                "detected_language": "th",
                 "quality_score": 1.0,
             },
             {
@@ -157,7 +194,7 @@ def test_pipeline_filters_noise_and_shards_payload():
                 "channel_id": "10",
                 "content": "กดตรงไหนถึงจะเข้า code ai ได้",
                 "created_at": "2026-03-24T00:03:00Z",
-                "is_target_language": True,
+                "detected_language": "th",
                 "quality_score": 1.0,
             },
             {
@@ -165,7 +202,7 @@ def test_pipeline_filters_noise_and_shards_payload():
                 "channel_id": "10",
                 "content": "กดตรงไหนถึงจะเข้า code ai ได้",
                 "created_at": "2026-03-24T00:04:00Z",
-                "is_target_language": True,
+                "detected_language": "th",
                 "quality_score": 1.0,
             },
         ]
@@ -199,7 +236,6 @@ def test_daily_report_service_generates_hourly_and_daily_reports(tmp_path):
             message_id=1,
             content="อัปเดตแล้วเปิดไม่ได้ ต้องลบแอพติดตั้งใหม่",
             created_at=datetime(2026, 3, 23, 16, 30, tzinfo=timezone.utc),
-            is_target_language=True,
         )
     )
     db.upsert_message(
@@ -207,7 +243,6 @@ def test_daily_report_service_generates_hourly_and_daily_reports(tmp_path):
             message_id=2,
             content="กดตรงไหนถึงจะเข้า code ai ได้",
             created_at=datetime(2026, 3, 23, 18, 10, tzinfo=timezone.utc),
-            is_target_language=True,
         )
     )
 
@@ -228,8 +263,8 @@ def test_daily_report_service_generates_hourly_and_daily_reports(tmp_path):
 
     assert report.id == stored.id
     assert stored.source_message_count == 2
-    assert stored.target_message_count == 2
-    assert db.count_hourly_reports(report_date) == 12
+    assert stored.candidate_message_count == 2
+    assert db.count_hourly_reports(report_date) == 2
     assert "每日报告" in stored.content_cn
     assert "hourly_reports JSON" in stored.content_cn
 
@@ -243,7 +278,6 @@ def test_generate_today_so_far_report_uses_today_window(tmp_path):
             message_id=1,
             content="เมื่อวานมีบัคแต่วันนี้หายแล้ว",
             created_at=datetime(2026, 3, 23, 15, 59, tzinfo=timezone.utc),
-            is_target_language=True,
         )
     )
     db.upsert_message(
@@ -251,7 +285,6 @@ def test_generate_today_so_far_report_uses_today_window(tmp_path):
             message_id=2,
             content="วันนี้เข้าไม่ได้หลังอัปเดต",
             created_at=datetime(2026, 3, 24, 1, 0, tzinfo=timezone.utc),
-            is_target_language=True,
         )
     )
 
@@ -261,7 +294,7 @@ def test_generate_today_so_far_report_uses_today_window(tmp_path):
     stored = db.get_daily_report_by_date(date(2026, 3, 24))
     assert report.id == stored.id
     assert stored.source_message_count == 1
-    assert stored.target_message_count == 1
+    assert stored.candidate_message_count == 1
     assert stored.window_start.replace(tzinfo=timezone.utc) == datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc)
     assert stored.window_end.replace(tzinfo=timezone.utc) == now.astimezone(timezone.utc)
 
@@ -293,7 +326,6 @@ def test_channel_scoped_reports_are_generated_separately(tmp_path):
             message_id=11,
             content="อัปเดตแล้วส่งข้อความไม่ได้",
             created_at=datetime(2026, 3, 23, 16, 20, tzinfo=timezone.utc),
-            is_target_language=True,
             channel_id=1400146275512352799,
             region_key="th",
             region_name="泰国",
@@ -305,7 +337,6 @@ def test_channel_scoped_reports_are_generated_separately(tmp_path):
             message_id=12,
             content="อยากให้เพิ่มประวัติการสนทนา",
             created_at=datetime(2026, 3, 23, 16, 50, tzinfo=timezone.utc),
-            is_target_language=True,
             channel_id=1400147594625290370,
             region_key="th",
             region_name="泰国",
@@ -361,3 +392,81 @@ def test_channel_scoped_reports_are_generated_separately(tmp_path):
     assert chat_report is not None and chat_report.source_message_count == 1
     assert feedback_report is not None and feedback_report.source_message_count == 1
     assert feedback_report.channel_name == "Rubii反馈"
+
+
+def test_hourly_report_survives_flaky_shard_response(tmp_path):
+    db = _make_db(tmp_path)
+    report_date = date(2026, 3, 24)
+    db.upsert_message(
+        _message_payload(
+            message_id=31,
+            content="อัปเดตแล้วเข้าไม่ได้ ต้องลงใหม่",
+            created_at=datetime(2026, 3, 23, 16, 10, tzinfo=timezone.utc),
+        )
+    )
+    db.upsert_message(
+        _message_payload(
+            message_id=32,
+            content="กดตรงไหนถึงจะเข้า code ai ได้",
+            created_at=datetime(2026, 3, 23, 16, 20, tzinfo=timezone.utc),
+        )
+    )
+
+    service = DailyReportService(db=db, translator=FlakyTranslator())
+    report = service.generate_hourly_report_for_window(
+        report_date,
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+    )
+
+    assert report.source_message_count == 2
+    assert report.candidate_message_count == 2
+
+
+def test_generate_channel_today_text_report(tmp_path):
+    db = _make_db(tmp_path)
+    now = datetime(2026, 3, 24, 12, 30, tzinfo=SHANGHAI_TZ)
+    channel_id = 1400146275512352799
+    region_key = "th"
+
+    db.upsert_message(
+        _message_payload(
+            message_id=41,
+            content="อัปเดตแล้วเข้าไม่ได้ ต้องลงใหม่",
+            created_at=datetime(2026, 3, 24, 1, 10, tzinfo=timezone.utc),
+            channel_id=channel_id,
+            region_key=region_key,
+            region_name="泰国",
+            channel_name="聊天室",
+        )
+    )
+    db.upsert_message(
+        _message_payload(
+            message_id=42,
+            content="กดตรงไหนถึงจะเข้า code ai ได้",
+            created_at=datetime(2026, 3, 24, 2, 0, tzinfo=timezone.utc),
+            channel_id=channel_id,
+            region_key=region_key,
+            region_name="泰国",
+            channel_name="聊天室",
+        )
+    )
+
+    scopes = [
+        ReportScope(scope_type="global", scope_key="global"),
+        ReportScope(
+            scope_type="channel",
+            scope_key=f"{region_key}:{channel_id}",
+            region_key=region_key,
+            region_name="泰国",
+            channel_id=channel_id,
+            channel_name="聊天室",
+        ),
+    ]
+    service = DailyReportService(db=db, translator=FakeTranslator(), scopes=scopes)
+    report = service.generate_channel_today_text_report(channel_id=channel_id, now=now)
+
+    assert report.scope_key == f"{region_key}:{channel_id}"
+    assert report.source_message_count == 2
+    assert report.candidate_message_count == 2
+    assert "泰国 / 聊天室" in report.content_cn

@@ -41,9 +41,8 @@ class Message(Base):
     scope_key: Mapped[str] = mapped_column(String(255), default="default:0", index=True)
 
     content: Mapped[str] = mapped_column(Text)
-    is_target_language: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    language: Mapped[str] = mapped_column(String(16), default="unknown")
-    lang_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    detected_language: Mapped[str] = mapped_column(String(32), default="unknown", index=True)
+    detected_language_confidence: Mapped[float] = mapped_column(Float, default=0.0)
 
     cleaned_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tokens: Mapped[List[str]] = mapped_column(JSON, default=list)
@@ -88,7 +87,7 @@ class DailyReport(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_cn: Mapped[str] = mapped_column(Text, nullable=False)
     source_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    target_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candidate_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -117,7 +116,6 @@ class HourlyReport(Base):
     window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     content_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     source_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    target_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     candidate_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     shard_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

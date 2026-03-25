@@ -126,6 +126,65 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     raise RuntimeError(f"LLM response did not contain a decodable JSON object: {candidate[:400]}")
 
 
+def _extract_text_from_response_body(body: dict[str, Any]) -> str:
+    text_parts: list[str] = []
+
+    def _append(value: Any) -> None:
+        text = str(value or "").strip()
+        if text:
+            text_parts.append(text)
+
+    content = body.get("content")
+    if isinstance(content, str):
+        _append(content)
+    elif isinstance(content, list):
+        for chunk in content:
+            if isinstance(chunk, str):
+                _append(chunk)
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("type") == "text":
+                _append(chunk.get("text"))
+                continue
+            if isinstance(chunk.get("text"), str):
+                _append(chunk.get("text"))
+                continue
+            if isinstance(chunk.get("content"), str):
+                _append(chunk.get("content"))
+
+    if isinstance(body.get("output_text"), str):
+        _append(body.get("output_text"))
+    if isinstance(body.get("completion"), str):
+        _append(body.get("completion"))
+    if isinstance(body.get("text"), str):
+        _append(body.get("text"))
+
+    choices = body.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            if isinstance(choice.get("text"), str):
+                _append(choice.get("text"))
+            message = choice.get("message")
+            if isinstance(message, dict):
+                message_content = message.get("content")
+                if isinstance(message_content, str):
+                    _append(message_content)
+                elif isinstance(message_content, list):
+                    for chunk in message_content:
+                        if isinstance(chunk, str):
+                            _append(chunk)
+                        elif isinstance(chunk, dict):
+                            _append(chunk.get("text") or chunk.get("content"))
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                _append(delta.get("text") or delta.get("content"))
+
+    return "\n".join(part for part in text_parts if part).strip()
+
+
 def _coerce_string_list(values: Any, limit: int = 5) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -257,7 +316,6 @@ def _empty_daily_markdown(report_date: date, window_start: datetime, window_end:
             "## 数据说明",
             "",
             "- 总消息数: 0",
-            "- 目标语言消息数: 0",
             "- 候选信号消息数: 0",
         ]
     )
@@ -275,7 +333,6 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
         "## 今日概览",
         "",
         f"- 收集消息总数: {summary['source_message_count']}",
-        f"- 目标语言消息数: {summary['target_message_count']}",
         f"- 进入分析的候选消息数: {summary['candidate_message_count']}",
         f"- 活跃用户数: {summary['active_user_count']}",
         f"- 2 小时间隔报告数: {summary.get('interval_count', 1)}",
@@ -321,6 +378,7 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
             "## 数据说明",
             "",
             f"- 覆盖频道数: {len(summary.get('channel_ids', []))}",
+            f"- 语言分布: {json.dumps(summary.get('detected_language_breakdown', {}), ensure_ascii=False)}",
             f"- 过滤详情: {json.dumps(summary.get('filter_details', {}), ensure_ascii=False)}",
         ]
     )
@@ -348,12 +406,12 @@ def build_empty_summary(
         "channel_id": scope.channel_id,
         "channel_name": scope.channel_name,
         "source_message_count": 0,
-        "target_message_count": 0,
         "candidate_message_count": 0,
         "active_user_count": 0,
         "channel_ids": [],
         "shard_count": 0,
         "interval_count": 0,
+        "detected_language_breakdown": {},
         "filter_details": {},
         "urgent_issues": [],
         "product_opportunities": [],
@@ -508,11 +566,13 @@ class DailyReportTranslator:
                     response.raise_for_status()
                 response.raise_for_status()
                 body = response.json()
-                chunks = body.get("content", [])
-                text_parts = [chunk.get("text", "") for chunk in chunks if chunk.get("type") == "text"]
-                text = "\n".join(part for part in text_parts if part.strip()).strip()
+                text = _extract_text_from_response_body(body)
                 if not text:
-                    raise RuntimeError("LLM response did not contain text content")
+                    if attempt < 3:
+                        time.sleep(2 ** (attempt - 1))
+                        continue
+                    preview = json.dumps(body, ensure_ascii=False)[:600]
+                    raise RuntimeError(f"LLM response did not contain text content: {preview}")
                 return text
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
@@ -527,6 +587,14 @@ class DailyReportTranslator:
                 raise RuntimeError(
                     f"LLM request failed after retries (timeout={timeout.read}s, chars={len(user_content)})"
                 ) from exc
+
+    def empty_summary(self, reason: str = "分片总结失败，已跳过。") -> dict[str, Any]:
+        return {
+            "urgent_issues": [],
+            "product_opportunities": [],
+            "general_feedback": [],
+            "sentiment": {"score": "neutral", "reason": reason},
+        }
 
     def summarize_signal_shard(self, shard: dict[str, Any]) -> dict[str, Any]:
         system = (
@@ -575,6 +643,113 @@ class DailyReportTranslator:
         user_content = f"把下面的 JSON 总结成中文报告交给我：\n{json.dumps(summary, ensure_ascii=False)}"
         return self._request_text(system=system, user_content=user_content, max_tokens=6144).strip()
 
+    def summarize_channel_text_shard(self, shard: dict[str, Any], scope: ReportScope, report_date: date) -> str:
+        system = (
+            "你是产品情报分析助手。"
+            "你会阅读单个 Discord 频道在一个时间片内的候选消息 JSON，并直接输出中文子报告。"
+            "不要输出 JSON，不要解释提示词，只输出简洁、专业、可合并的中文报告。"
+            "优先保留问题、用户诉求、明显趋势和代表性证据。"
+        )
+        user_content = (
+            f"频道：{scope.display_name}\n"
+            f"报告日期：{report_date.isoformat()}\n"
+            f"时间窗口：{shard.get('window_start')} 至 {shard.get('window_end')}\n"
+            "请直接生成一份中文子报告，长度尽量控制在 300 到 600 字之间。\n"
+            "如果这一批里高价值信号不多，也请把真正有用的信息说清楚，不要为了凑字数编造内容。\n"
+            "下面是候选消息 JSON：\n"
+            f"{json.dumps(shard, ensure_ascii=False)}"
+        )
+        return self._request_text(system=system, user_content=user_content, max_tokens=2048).strip()
+
+    def merge_channel_text_reports(
+        self,
+        *,
+        scope: ReportScope,
+        report_date: date,
+        window_start: datetime,
+        window_end: datetime,
+        shard_reports: list[str],
+        source_message_count: int,
+        candidate_message_count: int,
+        active_user_count: int,
+        max_batch_chars: int = 18_000,
+        depth: int = 0,
+    ) -> str:
+        cleaned_reports = [text.strip() for text in shard_reports if str(text or "").strip()]
+        if not cleaned_reports:
+            return (
+                f"{scope.display_name} 在 {report_date.isoformat()} 00:00 至当前时间内没有足够的有效信号，"
+                "暂时无法生成有意义的中文日报。"
+            )
+
+        def _chunk_texts(texts: list[str], budget: int) -> list[list[str]]:
+            groups: list[list[str]] = []
+            current: list[str] = []
+            current_chars = 0
+            for text in texts:
+                size = len(text)
+                if current and current_chars + size > budget:
+                    groups.append(current)
+                    current = []
+                    current_chars = 0
+                current.append(text)
+                current_chars += size
+            if current:
+                groups.append(current)
+            return groups
+
+        total_chars = sum(len(text) for text in cleaned_reports)
+        if len(cleaned_reports) > 6 or total_chars > max_batch_chars:
+            merged_chunks = []
+            for index, batch in enumerate(_chunk_texts(cleaned_reports, max_batch_chars), start=1):
+                merged_chunks.append(
+                    self.merge_channel_text_reports(
+                        scope=scope,
+                        report_date=report_date,
+                        window_start=window_start,
+                        window_end=window_end,
+                        shard_reports=batch,
+                        source_message_count=source_message_count,
+                        candidate_message_count=candidate_message_count,
+                        active_user_count=active_user_count,
+                        max_batch_chars=max_batch_chars,
+                        depth=depth + 1,
+                    )
+                )
+            if len(merged_chunks) == 1:
+                return merged_chunks[0]
+            return self.merge_channel_text_reports(
+                scope=scope,
+                report_date=report_date,
+                window_start=window_start,
+                window_end=window_end,
+                shard_reports=merged_chunks,
+                source_message_count=source_message_count,
+                candidate_message_count=candidate_message_count,
+                active_user_count=active_user_count,
+                max_batch_chars=max_batch_chars,
+                depth=depth + 1,
+            )
+
+        system = (
+            "你是产品情报分析助手。"
+            "你会把同一频道同一天的多段中文子报告合并成一份最终中文日报。"
+            "要求去重、合并同类问题、保留重要证据和趋势，不要重复表述。"
+            "不要输出 JSON，不要说明你的处理过程，直接输出最终中文日报。"
+        )
+        user_content = (
+            f"频道：{scope.display_name}\n"
+            f"报告日期：{report_date.isoformat()}\n"
+            f"时间窗口：{window_start.isoformat()} 至 {window_end.isoformat()}\n"
+            f"总消息数：{source_message_count}\n"
+            f"进入分析的候选消息数：{candidate_message_count}\n"
+            f"活跃用户数：{active_user_count}\n"
+            f"子报告数量：{len(cleaned_reports)}\n"
+            "请把下面这些中文子报告合并成一份自然、清晰、面向产品/运营可读的最终中文日报：\n\n"
+            + "\n\n".join(f"子报告 {index}：\n{text}" for index, text in enumerate(cleaned_reports, start=1))
+        )
+        return self._request_text(system=system, user_content=user_content, max_tokens=6144).strip()
+
 
 class DailyReportService:
     def __init__(
@@ -605,6 +780,19 @@ class DailyReportService:
         if include_global:
             return list(self.scopes)
         return [scope for scope in self.scopes if scope.scope_type != "global"]
+
+    def get_scope_for_channel(self, channel_id: int) -> ReportScope:
+        for scope in self.iter_scopes(include_global=False):
+            if int(scope.channel_id or 0) == int(channel_id):
+                return scope
+        return ReportScope(
+            scope_type="channel",
+            scope_key=f"manual:{int(channel_id)}",
+            region_key="manual",
+            region_name="手动频道",
+            channel_id=int(channel_id),
+            channel_name=f"channel {int(channel_id)}",
+        )
 
     def _local_midnight(self, target_date: date) -> datetime:
         return datetime.combine(target_date, dt_time.min, tzinfo=self.local_tz)
@@ -639,6 +827,91 @@ class DailyReportService:
             end = start + timedelta(hours=self.interval_hours)
             windows.append((report_date, start.astimezone(timezone.utc), end.astimezone(timezone.utc)))
         return windows
+
+    def _split_shard(self, shard: dict[str, Any], suffix: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "shard_id": f"{shard.get('shard_id', 'shard')}-{suffix}",
+            "window_start": shard.get("window_start"),
+            "window_end": shard.get("window_end"),
+            "stats": {
+                "candidate_count": len(items),
+                "message_count": sum(int(entry.get("message_count", 0)) for entry in items),
+                "channel_count": len({entry.get("channel_id") for entry in items if entry.get("channel_id")}),
+            },
+            "items": items,
+        }
+
+    def _summarize_signal_shard_resilient(
+        self,
+        shard: dict[str, Any],
+        *,
+        scope: ReportScope,
+        depth: int = 0,
+    ) -> dict[str, Any]:
+        if self.translator is None:
+            raise RuntimeError("LLM translator is required for shard summarization")
+        try:
+            return self.translator.summarize_signal_shard(shard)
+        except Exception as exc:
+            items = list(shard.get("items") or [])
+            if len(items) > 1 and depth < 2:
+                print(
+                    f"[llm] retry-split {scope.display_name} shard={shard.get('shard_id')} "
+                    f"items={len(items)} reason={type(exc).__name__}"
+                )
+                midpoint = max(1, len(items) // 2)
+                left = self._split_shard(shard, "a", items[:midpoint])
+                right = self._split_shard(shard, "b", items[midpoint:])
+                partials = [
+                    self._summarize_signal_shard_resilient(left, scope=scope, depth=depth + 1),
+                    self._summarize_signal_shard_resilient(right, scope=scope, depth=depth + 1),
+                ]
+                merged = {
+                    "urgent_issues": _merge_section_items(partials, "urgent_issues"),
+                    "product_opportunities": _merge_section_items(partials, "product_opportunities"),
+                    "general_feedback": _merge_section_items(partials, "general_feedback"),
+                }
+                merged["sentiment"] = _derive_sentiment(merged)
+                return merged
+
+            print(
+                f"[llm] skip {scope.display_name} shard={shard.get('shard_id')} "
+                f"reason={type(exc).__name__}: {exc}"
+            )
+            return self.translator.empty_summary()
+
+    def _summarize_channel_text_shard_resilient(
+        self,
+        shard: dict[str, Any],
+        *,
+        scope: ReportScope,
+        report_date: date,
+        depth: int = 0,
+    ) -> list[str]:
+        if self.translator is None:
+            raise RuntimeError("LLM translator is required for channel text summarization")
+        try:
+            text = self.translator.summarize_channel_text_shard(shard, scope=scope, report_date=report_date)
+            return [text] if text.strip() else []
+        except Exception as exc:
+            items = list(shard.get("items") or [])
+            if len(items) > 1 and depth < 2:
+                print(
+                    f"[channel-llm] retry-split {scope.display_name} shard={shard.get('shard_id')} "
+                    f"items={len(items)} reason={type(exc).__name__}"
+                )
+                midpoint = max(1, len(items) // 2)
+                left = self._split_shard(shard, "a", items[:midpoint])
+                right = self._split_shard(shard, "b", items[midpoint:])
+                return (
+                    self._summarize_channel_text_shard_resilient(left, scope=scope, report_date=report_date, depth=depth + 1)
+                    + self._summarize_channel_text_shard_resilient(right, scope=scope, report_date=report_date, depth=depth + 1)
+                )
+            print(
+                f"[channel-llm] skip {scope.display_name} shard={shard.get('shard_id')} "
+                f"reason={type(exc).__name__}: {exc}"
+            )
+            return []
 
     def _build_summary_from_messages(
         self,
@@ -698,12 +971,12 @@ class DailyReportService:
             "channel_id": scope.channel_id,
             "channel_name": scope.channel_name,
             "source_message_count": report["source_message_count"],
-            "target_message_count": report["target_message_count"],
             "candidate_message_count": report["candidate_message_count"],
             "active_user_count": report["active_user_count"],
             "channel_ids": sorted({str(getattr(msg, "channel_id", "")) for msg in messages if getattr(msg, "channel_id", None)}),
             "shard_count": report["shard_count"],
             "interval_count": 1,
+            "detected_language_breakdown": report.get("detected_language_breakdown", {}),
             "filter_details": report["filter_details"],
         }
         if report["candidate_message_count"] == 0:
@@ -735,12 +1008,12 @@ class DailyReportService:
             for index, shard in enumerate(bundle["shards"], start=1):
                 if total_shards > 1:
                     print(f"[llm] {scope.display_name} {index}/{total_shards} chunks")
-                shard_summaries.append(self.translator.summarize_signal_shard(shard))
+                shard_summaries.append(self._summarize_signal_shard_resilient(shard, scope=scope))
         else:
             shard_summaries = [None] * total_shards
             with ThreadPoolExecutor(max_workers=parallel_requests) as executor:
                 future_map = {
-                    executor.submit(self.translator.summarize_signal_shard, shard): index
+                    executor.submit(self._summarize_signal_shard_resilient, shard, scope=scope): index
                     for index, shard in enumerate(bundle["shards"], start=1)
                 }
                 for future in as_completed(future_map):
@@ -781,7 +1054,6 @@ class DailyReportService:
             "window_end": _ensure_utc(window_end),
             "content_json": summary,
             "source_message_count": summary["source_message_count"],
-            "target_message_count": summary["target_message_count"],
             "candidate_message_count": summary["candidate_message_count"],
             "shard_count": summary.get("shard_count", 0),
             "generated_at": now,
@@ -816,23 +1088,12 @@ class DailyReportService:
                 for scope in self.scopes
             }
             for future in as_completed(future_map):
-                results.append(future.result())
+                scope = future_map[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    print(f"[hourly] skip {scope.display_name} reason={type(exc).__name__}: {exc}")
         return sorted(results, key=lambda item: (item.scope_type != "global", item.region_key, item.channel_name))
-
-    def backfill_recent_hourly_reports(self, now: Optional[datetime] = None) -> int:
-        local_now = (now or datetime.now(tz=self.local_tz)).astimezone(self.local_tz)
-        utc_now = local_now.astimezone(timezone.utc)
-        created = 0
-        for report_date in [local_now.date() - timedelta(days=1), local_now.date()]:
-            for _, window_start, window_end in self.iter_interval_windows_for_date(report_date):
-                if window_end > utc_now:
-                    continue
-                for scope in self.scopes:
-                    if self.db.get_hourly_report_by_window(window_start, window_end, self.timezone_name, scope_key=scope.scope_key) is not None:
-                        continue
-                    self.generate_hourly_report_for_window(report_date, window_start, window_end, scope=scope)
-                    created += 1
-        return created
 
     def _merge_hourly_reports(self, report_date: date, hourly_reports: list[Any], scope: Optional[ReportScope] = None) -> dict[str, Any]:
         scope = scope or ReportScope(scope_type="global", scope_key="global")
@@ -876,14 +1137,20 @@ class DailyReportService:
             "channel_id": scope.channel_id,
             "channel_name": scope.channel_name,
             "source_message_count": sum(int(report.source_message_count or 0) for report in hourly_reports),
-            "target_message_count": sum(int(report.target_message_count or 0) for report in hourly_reports),
             "candidate_message_count": sum(int(report.candidate_message_count or 0) for report in hourly_reports),
             "active_user_count": len({str(getattr(msg, "author_id", "")) for msg in messages}),
             "channel_ids": sorted(channel_ids),
             "shard_count": sum(int(report.shard_count or 0) for report in hourly_reports),
             "interval_count": len(hourly_reports),
+            "detected_language_breakdown": {},
             "filter_details": filter_details,
         }
+        detected_language_breakdown: dict[str, int] = {}
+        for report in hourly_reports:
+            payload = report.content_json or {}
+            for language, count in (payload.get("detected_language_breakdown") or {}).items():
+                detected_language_breakdown[str(language)] = detected_language_breakdown.get(str(language), 0) + int(count)
+        summary["detected_language_breakdown"] = detected_language_breakdown
         child_summaries = [report.content_json or {} for report in hourly_reports]
         summary["urgent_issues"] = _merge_section_items(child_summaries, "urgent_issues")
         summary["product_opportunities"] = _merge_section_items(child_summaries, "product_opportunities")
@@ -893,12 +1160,8 @@ class DailyReportService:
 
     def generate_daily_report_from_hourly_reports(self, report_date: date, scope: Optional[ReportScope] = None):
         scope = scope or ReportScope(scope_type="global", scope_key="global")
-        expected_windows = self.iter_interval_windows_for_date(report_date)
-        for _, window_start, window_end in expected_windows:
-            if self.db.get_hourly_report_by_window(window_start, window_end, self.timezone_name, scope_key=scope.scope_key) is None:
-                self.generate_hourly_report_for_window(report_date, window_start, window_end, scope=scope)
-
         hourly_reports = self.db.get_hourly_reports_for_date(report_date, scope_key=scope.scope_key)
+        expected_windows = self.iter_interval_windows_for_date(report_date)
         summary = self._merge_hourly_reports(report_date, hourly_reports, scope=scope)
         markdown = (
             _empty_daily_markdown(report_date, _ensure_utc(expected_windows[0][1]), _ensure_utc(expected_windows[-1][2]))
@@ -938,7 +1201,7 @@ class DailyReportService:
             "content": markdown,
             "content_cn": content_cn,
             "source_message_count": summary["source_message_count"],
-            "target_message_count": summary["target_message_count"],
+            "candidate_message_count": summary["candidate_message_count"],
             "generated_at": now,
             "updated_at": now,
         }
@@ -948,8 +1211,7 @@ class DailyReportService:
         report_date, _, _ = self.build_previous_day_window(now=now)
         return self.generate_daily_report_from_hourly_reports(report_date)
 
-    def generate_previous_day_reports(self, now: Optional[datetime] = None) -> list[Any]:
-        report_date, _, _ = self.build_previous_day_window(now=now)
+    def generate_daily_reports_for_date(self, report_date: date) -> list[Any]:
         results: list[Any] = []
         scope_workers = min(len(self.scopes), self._max_scope_workers())
         if scope_workers <= 1 or len(self.scopes) <= 1:
@@ -962,8 +1224,16 @@ class DailyReportService:
                 for scope in self.scopes
             }
             for future in as_completed(future_map):
-                results.append(future.result())
+                scope = future_map[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    print(f"[daily] skip {scope.display_name} reason={type(exc).__name__}: {exc}")
         return sorted(results, key=lambda item: (item.scope_type != "global", item.region_key, item.channel_name))
+
+    def generate_previous_day_reports(self, now: Optional[datetime] = None) -> list[Any]:
+        report_date, _, _ = self.build_previous_day_window(now=now)
+        return self.generate_daily_reports_for_date(report_date)
 
     def generate_today_so_far_report(self, now: Optional[datetime] = None, scope: Optional[ReportScope] = None):
         scope = scope or ReportScope(scope_type="global", scope_key="global")
@@ -1013,7 +1283,135 @@ class DailyReportService:
             "content": markdown,
             "content_cn": content_cn,
             "source_message_count": summary["source_message_count"],
-            "target_message_count": summary["target_message_count"],
+            "candidate_message_count": summary["candidate_message_count"],
+            "generated_at": current_time,
+            "updated_at": current_time,
+        }
+        return self.db.upsert_daily_report(payload)
+
+    def generate_channel_today_text_report(self, channel_id: int, now: Optional[datetime] = None):
+        if self.translator is None:
+            raise RuntimeError("LLM translator is required for channel-specific report generation")
+
+        scope = self.get_scope_for_channel(channel_id)
+        report_date, window_start, window_end = self.build_today_so_far_window(now=now)
+        utc_start = _ensure_utc(window_start)
+        utc_end = _ensure_utc(window_end)
+        messages = self.db.get_messages_for_window(utc_start, utc_end, channel_id=int(channel_id))
+
+        if not messages:
+            content = (
+                f"{scope.display_name} 在 {report_date.isoformat()} 00:00 至当前时间内没有新的已收集消息，"
+                "因此没有可生成的频道日报。"
+            )
+            current_time = datetime.now(tz=timezone.utc)
+            return self.db.upsert_daily_report(
+                {
+                    "report_date": report_date,
+                    "timezone": self.timezone_name,
+                    "scope_type": scope.scope_type,
+                    "scope_key": scope.scope_key,
+                    "region_key": scope.region_key,
+                    "channel_id": scope.channel_id,
+                    "channel_name": scope.channel_name,
+                    "window_start": utc_start,
+                    "window_end": utc_end,
+                    "content": content,
+                    "content_cn": content,
+                    "source_message_count": 0,
+                    "candidate_message_count": 0,
+                    "generated_at": current_time,
+                    "updated_at": current_time,
+                }
+            )
+
+        bundle = build_interval_pipeline_bundle_from_messages(
+            messages=messages,
+            report_date=report_date,
+            timezone_name=self.timezone_name,
+            window_start=utc_start,
+            window_end=utc_end,
+        )
+        plan = self.translator.build_execution_plan(bundle["report"])
+        planned_budget = int(plan["shard_char_budget"])
+        if planned_budget != bundle["report"].get("shard_char_budget", 12_000):
+            bundle = build_interval_pipeline_bundle_from_messages(
+                messages=messages,
+                report_date=report_date,
+                timezone_name=self.timezone_name,
+                window_start=utc_start,
+                window_end=utc_end,
+                shard_char_budget=planned_budget,
+            )
+            plan = self.translator.build_execution_plan(bundle["report"])
+
+        report = bundle["report"]
+        shard_reports: list[str] = []
+        total_shards = len(bundle["shards"])
+        if total_shards > 1:
+            print(
+                f"[channel-llm] {scope.display_name} shards={total_shards} "
+                f"candidates={report['candidate_group_count']} parallel={plan['parallel_requests']} "
+                f"budget={plan['remaining_calls']}/{plan['effective_call_limit']}"
+            )
+
+        parallel_requests = max(1, int(plan["parallel_requests"]))
+        if parallel_requests <= 1 or total_shards <= 1:
+            for index, shard in enumerate(bundle["shards"], start=1):
+                if total_shards > 1:
+                    print(f"[channel-llm] {scope.display_name} {index}/{total_shards} chunks")
+                shard_reports.extend(
+                    self._summarize_channel_text_shard_resilient(shard, scope=scope, report_date=report_date)
+                )
+        else:
+            with ThreadPoolExecutor(max_workers=parallel_requests) as executor:
+                future_map = {
+                    executor.submit(
+                        self._summarize_channel_text_shard_resilient,
+                        shard,
+                        scope=scope,
+                        report_date=report_date,
+                    ): index
+                    for index, shard in enumerate(bundle["shards"], start=1)
+                }
+                for future in as_completed(future_map):
+                    index = future_map[future]
+                    print(f"[channel-llm] {scope.display_name} done {index}/{total_shards}")
+                    shard_reports.extend(future.result())
+
+        final_report = (
+            self.translator.merge_channel_text_reports(
+                scope=scope,
+                report_date=report_date,
+                window_start=utc_start,
+                window_end=utc_end,
+                shard_reports=shard_reports,
+                source_message_count=int(report["source_message_count"]),
+                candidate_message_count=int(report["candidate_message_count"]),
+                active_user_count=int(report["active_user_count"]),
+            )
+            if shard_reports
+            else (
+                f"{scope.display_name} 在 {report_date.isoformat()} 00:00 至当前时间内收到了 "
+                f"{int(report['source_message_count'])} 条消息，但暂时没有整理出足够稳定的中文子报告。"
+            )
+        )
+
+        current_time = datetime.now(tz=timezone.utc)
+        payload = {
+            "report_date": report_date,
+            "timezone": self.timezone_name,
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "region_key": scope.region_key,
+            "channel_id": scope.channel_id,
+            "channel_name": scope.channel_name,
+            "window_start": utc_start,
+            "window_end": utc_end,
+            "content": final_report,
+            "content_cn": final_report,
+            "source_message_count": int(report["source_message_count"]),
+            "candidate_message_count": int(report["candidate_message_count"]),
             "generated_at": current_time,
             "updated_at": current_time,
         }

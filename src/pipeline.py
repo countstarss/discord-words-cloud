@@ -187,8 +187,8 @@ def _empty_dataframe() -> pd.DataFrame:
             "author_id",
             "content",
             "created_at",
-            "language",
-            "is_target_language",
+            "detected_language",
+            "detected_language_confidence",
             "quality_score",
         ]
     )
@@ -206,15 +206,24 @@ def normalize_input_dataframe(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         "author_id": "unknown",
         "content": "",
         "created_at": pd.Timestamp.now(tz="UTC"),
-        "language": "unknown",
+        "detected_language": "unknown",
+        "detected_language_confidence": 0.0,
         "quality_score": 1.0,
     }
     for column, default in defaults.items():
         if column not in normalized.columns:
             normalized[column] = default
 
-    if "is_target_language" not in normalized.columns:
-        normalized["is_target_language"] = normalized.get("is_thai", False)
+    if "detected_language" not in normalized.columns:
+        if "language" in normalized.columns:
+            normalized["detected_language"] = normalized["language"]
+        else:
+            normalized["detected_language"] = "unknown"
+    if "detected_language_confidence" not in normalized.columns:
+        if "lang_confidence" in normalized.columns:
+            normalized["detected_language_confidence"] = normalized["lang_confidence"]
+        else:
+            normalized["detected_language_confidence"] = 0.0
 
     normalized["created_at"] = pd.to_datetime(normalized["created_at"], utc=True, errors="coerce")
     normalized["created_at"] = normalized["created_at"].fillna(pd.Timestamp.now(tz="UTC"))
@@ -222,9 +231,11 @@ def normalize_input_dataframe(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     normalized["channel_id"] = normalized["channel_id"].fillna("unknown").astype(str)
     normalized["guild_id"] = normalized["guild_id"].fillna("unknown").astype(str)
     normalized["content"] = normalized["content"].fillna("").astype(str)
-    normalized["language"] = normalized["language"].fillna("unknown").astype(str)
+    normalized["detected_language"] = normalized["detected_language"].fillna("unknown").astype(str)
+    normalized["detected_language_confidence"] = (
+        pd.to_numeric(normalized["detected_language_confidence"], errors="coerce").fillna(0.0)
+    )
     normalized["quality_score"] = pd.to_numeric(normalized["quality_score"], errors="coerce").fillna(1.0)
-    normalized["is_target_language"] = normalized["is_target_language"].fillna(False).astype(bool)
     return normalized.sort_values("created_at", kind="stable").reset_index(drop=True)
 
 
@@ -239,8 +250,8 @@ def messages_to_dataframe(messages: Iterable[Any]) -> pd.DataFrame:
                 "author_id": getattr(message, "author_id", "unknown"),
                 "content": getattr(message, "content", ""),
                 "created_at": getattr(message, "created_at", None),
-                "language": getattr(message, "language", "unknown"),
-                "is_target_language": getattr(message, "is_target_language", False),
+                "detected_language": getattr(message, "detected_language", "unknown"),
+                "detected_language_confidence": getattr(message, "detected_language_confidence", 0.0),
                 "quality_score": getattr(message, "quality_score", 1.0),
             }
         )
@@ -337,8 +348,6 @@ def _candidate_signal_score(candidate: dict[str, Any]) -> float:
     score += min(0.8, max(0, candidate["message_count"] - 1) * 0.12)
     score += min(0.8, max(0, candidate["unique_user_count"] - 1) * 0.16)
     score += min(0.3, len(candidate["hashtags"]) * 0.08)
-    if candidate["is_target_language"]:
-        score += 0.2
     score += min(0.3, float(candidate["quality_score"]) * 0.1)
     return round(score, 3)
 
@@ -376,11 +385,11 @@ def build_interval_pipeline_bundle_from_dataframe(
                 "window_start": window_start.isoformat(),
                 "window_end": window_end.isoformat(),
                 "source_message_count": 0,
-                "target_message_count": 0,
                 "active_user_count": 0,
                 "candidate_message_count": 0,
                 "candidate_group_count": 0,
                 "shard_count": 0,
+                "detected_language_breakdown": {},
                 "filter_details": {},
             },
             "candidates": [],
@@ -419,8 +428,7 @@ def build_interval_pipeline_bundle_from_dataframe(
             group = {
                 "channel_id": str(getattr(row, "channel_id", "unknown")),
                 "guild_id": str(getattr(row, "guild_id", "unknown")),
-                "language_counter": Counter([str(getattr(row, "language", "unknown"))]),
-                "is_target_hits": 1 if bool(getattr(row, "is_target_language", False)) else 0,
+                "language_counter": Counter([str(getattr(row, "detected_language", "unknown"))]),
                 "message_count": 1,
                 "authors": {str(getattr(row, "author_id", "unknown"))},
                 "quality_total": float(getattr(row, "quality_score", 1.0) or 1.0),
@@ -435,8 +443,7 @@ def build_interval_pipeline_bundle_from_dataframe(
             }
             groups[grouping_key] = group
         else:
-            group["language_counter"][str(getattr(row, "language", "unknown"))] += 1
-            group["is_target_hits"] += 1 if bool(getattr(row, "is_target_language", False)) else 0
+            group["language_counter"][str(getattr(row, "detected_language", "unknown"))] += 1
             group["message_count"] += 1
             group["authors"].add(str(getattr(row, "author_id", "unknown")))
             group["quality_total"] += float(getattr(row, "quality_score", 1.0) or 1.0)
@@ -457,8 +464,7 @@ def build_interval_pipeline_bundle_from_dataframe(
             "guild_id": group["guild_id"],
             "created_at": group["first_seen_at"],
             "last_seen_at": group["last_seen_at"],
-            "language": top_language,
-            "is_target_language": group["is_target_hits"] >= max(1, group["message_count"] // 2),
+            "detected_language": top_language,
             "message_count": int(group["message_count"]),
             "unique_user_count": int(len(group["authors"])),
             "quality_score": round(group["quality_total"] / max(1, group["message_count"]), 3),
@@ -536,7 +542,6 @@ def build_interval_pipeline_bundle_from_dataframe(
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
         "source_message_count": int(len(normalized)),
-        "target_message_count": int(normalized["is_target_language"].sum()),
         "active_user_count": int(normalized["author_id"].nunique()),
         "candidate_message_count": int(candidate_message_count),
         "candidate_group_count": int(len(llm_candidates)),
@@ -544,6 +549,10 @@ def build_interval_pipeline_bundle_from_dataframe(
         "candidate_payload_chars": int(candidate_payload_chars),
         "shard_count": int(len(shards)),
         "shard_char_budget": int(shard_char_budget),
+        "detected_language_breakdown": {
+            str(language): int(count)
+            for language, count in normalized["detected_language"].value_counts().items()
+        },
         "filter_details": dict(filter_counts),
     }
     return {"report": report, "candidates": llm_candidates, "shards": shards}

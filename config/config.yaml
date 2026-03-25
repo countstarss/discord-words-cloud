@@ -32,8 +32,7 @@ collector:
 
 # Message processor settings
 processor:
-  # Target language to detect (th = Thai, can be any language code)
-  target_language: th
+  # Detection metadata is stored for observability only.
   language_threshold: 0.2
   min_text_length: 1
   remove_urls: true

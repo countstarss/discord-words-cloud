@@ -14,36 +14,78 @@ from ..storage import Database
 
 # MARK: - Simple Language Detector
 class SimpleLangDetector:
-    """Simplified language detection for Thai and other languages."""
-    
+    """Best-effort script-based language detector for metadata only."""
+
     THAI_START = 0x0E00
     THAI_END = 0x0E7F
-    
+    HIRAGANA_START = 0x3040
+    HIRAGANA_END = 0x309F
+    KATAKANA_START = 0x30A0
+    KATAKANA_END = 0x30FF
+    HANGUL_START = 0xAC00
+    HANGUL_END = 0xD7AF
+    CJK_START = 0x4E00
+    CJK_END = 0x9FFF
+    SIMPLIFIED_HINTS = {"这", "个", "们", "为", "发", "现", "没", "后", "里", "应", "开", "关"}
+    TRADITIONAL_HINTS = {"這", "個", "們", "為", "發", "現", "沒", "後", "裡", "應", "開", "關"}
+
     def __init__(self, min_confidence: float = 0.2):
         self.min_confidence = min_confidence
-    
+
     def detect(self, text: str) -> tuple[str, float]:
         if not text:
             return "unknown", 0.0
-        
-        thai_chars = 0
+
+        counts = {
+            "th": 0,
+            "ja": 0,
+            "ko": 0,
+            "han": 0,
+            "latin": 0,
+        }
         total_chars = 0
-        
         for char in text:
             code = ord(char)
             if self.THAI_START <= code <= self.THAI_END:
-                thai_chars += 1
-            if char.isalpha() or char.isdigit():
+                counts["th"] += 1
                 total_chars += 1
-        
+            elif self.HIRAGANA_START <= code <= self.HIRAGANA_END or self.KATAKANA_START <= code <= self.KATAKANA_END:
+                counts["ja"] += 1
+                total_chars += 1
+            elif self.HANGUL_START <= code <= self.HANGUL_END:
+                counts["ko"] += 1
+                total_chars += 1
+            elif self.CJK_START <= code <= self.CJK_END:
+                counts["han"] += 1
+                total_chars += 1
+            elif char.isascii() and char.isalpha():
+                counts["latin"] += 1
+                total_chars += 1
+
         if total_chars == 0:
             return "unknown", 0.0
-        
-        ratio = thai_chars / total_chars
-        if ratio >= 0.3:
-            return "th", min(ratio, 1.0)
-        
-        return "other", ratio
+
+        for key in ("th", "ja", "ko"):
+            ratio = counts[key] / total_chars
+            if ratio >= self.min_confidence:
+                return key, min(ratio, 1.0)
+
+        han_ratio = counts["han"] / total_chars
+        if han_ratio >= self.min_confidence:
+            simplified_hits = sum(1 for char in text if char in self.SIMPLIFIED_HINTS)
+            traditional_hits = sum(1 for char in text if char in self.TRADITIONAL_HINTS)
+            if traditional_hits > simplified_hits:
+                return "zh-Hant", min(1.0, han_ratio + 0.1)
+            if simplified_hits > traditional_hits:
+                return "zh-Hans", min(1.0, han_ratio + 0.1)
+            return "zh", han_ratio
+
+        latin_ratio = counts["latin"] / total_chars
+        if latin_ratio >= self.min_confidence:
+            return "en", min(latin_ratio, 1.0)
+
+        mixed_ratio = max(counts.values()) / total_chars
+        return "other", min(mixed_ratio, 1.0)
 
 
 # MARK: - Simple Text Cleaner
@@ -286,15 +328,8 @@ class DiscordCollector(discord.Client):
 
         lang, confidence = self.detector.detect(message.content)
         
-        # Configurable target language (default: Thai)
-        target_lang = self.config.get("processor", {}).get("target_language", "th")
-        is_target = lang == target_lang and confidence >= self.detector.min_confidence
-
-        cleaned_text = None
+        cleaned_text = self.cleaner.clean(message.content)
         tokens = []
-
-        if is_target:
-            cleaned_text = self.cleaner.clean(message.content)
 
         content_hash = self.deduplicator.compute_hash(cleaned_text or message.content)
         quality_score = self.deduplicator.compute_quality_score(
@@ -328,9 +363,8 @@ class DiscordCollector(discord.Client):
             "channel_group": channel_group,
             "scope_key": scope_key,
             "content": message.content,
-            "is_target_language": bool(is_target),
-            "language": lang,
-            "lang_confidence": float(confidence),
+            "detected_language": lang,
+            "detected_language_confidence": float(confidence),
             "cleaned_text": cleaned_text,
             "tokens": tokens,
             "event_type": event_type,
