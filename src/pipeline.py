@@ -484,6 +484,7 @@ def build_interval_pipeline_bundle_from_dataframe(
     dropped_low_signal_candidates = raw_candidate_group_count - len(llm_candidates)
     if dropped_low_signal_candidates:
         filter_counts["low_signal_candidate"] += dropped_low_signal_candidates
+    candidate_payload_chars = sum(_compact_item_size(item) for item in llm_candidates)
 
     shards = []
     current_items: list[dict[str, Any]] = []
@@ -540,7 +541,9 @@ def build_interval_pipeline_bundle_from_dataframe(
         "candidate_message_count": int(candidate_message_count),
         "candidate_group_count": int(len(llm_candidates)),
         "raw_candidate_group_count": int(raw_candidate_group_count),
+        "candidate_payload_chars": int(candidate_payload_chars),
         "shard_count": int(len(shards)),
+        "shard_char_budget": int(shard_char_budget),
         "filter_details": dict(filter_counts),
     }
     return {"report": report, "candidates": llm_candidates, "shards": shards}

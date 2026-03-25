@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
+import threading
 import time
-from dataclasses import dataclass
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -307,20 +311,88 @@ def build_empty_summary(
 
 
 @dataclass
+class LLMBudgetConfig:
+    quota_per_5h: int = 600
+    utilization_ratio: float = 0.8
+    window_hours: int = 5
+    max_parallel_requests: int = 6
+    target_items_per_shard: int = 18
+    min_shard_chars: int = 6_000
+    max_shard_chars: int = 16_000
+    reserve_calls: int = 24
+
+    @property
+    def effective_call_limit(self) -> int:
+        return max(1, int(self.quota_per_5h * self.utilization_ratio))
+
+    @classmethod
+    def from_config(cls, raw: Optional[dict[str, Any]]) -> "LLMBudgetConfig":
+        raw = raw or {}
+        return cls(
+            quota_per_5h=int(raw.get("quota_per_5h", 600)),
+            utilization_ratio=float(raw.get("utilization_ratio", 0.8)),
+            window_hours=int(raw.get("window_hours", 5)),
+            max_parallel_requests=max(1, int(raw.get("max_parallel_requests", 6))),
+            target_items_per_shard=max(1, int(raw.get("target_items_per_shard", 18))),
+            min_shard_chars=max(2_000, int(raw.get("min_shard_chars", 6_000))),
+            max_shard_chars=max(4_000, int(raw.get("max_shard_chars", 16_000))),
+            reserve_calls=max(0, int(raw.get("reserve_calls", 24))),
+        )
+
+
+class RollingCallBudget:
+    def __init__(self, config: LLMBudgetConfig) -> None:
+        self.config = config
+        self._lock = threading.Lock()
+        self._calls: deque[float] = deque()
+
+    def _prune(self, now_ts: float) -> None:
+        cutoff = now_ts - (self.config.window_hours * 3600)
+        while self._calls and self._calls[0] <= cutoff:
+            self._calls.popleft()
+
+    def remaining_calls(self) -> int:
+        with self._lock:
+            now_ts = time.time()
+            self._prune(now_ts)
+            return max(0, self.config.effective_call_limit - len(self._calls))
+
+    def acquire_slot(self) -> None:
+        while True:
+            with self._lock:
+                now_ts = time.time()
+                self._prune(now_ts)
+                if len(self._calls) < self.config.effective_call_limit:
+                    self._calls.append(now_ts)
+                    return
+                wait_seconds = (self.config.window_hours * 3600) - (now_ts - self._calls[0]) + 0.05
+            time.sleep(max(0.05, min(wait_seconds, 5.0)))
+
+
+@dataclass
 class DailyReportTranslator:
     base_url: str
     model: str
     api_key: str
     timeout_seconds: float = 45.0
+    budget_config: LLMBudgetConfig = field(default_factory=LLMBudgetConfig)
 
     @classmethod
-    def from_env(cls) -> "DailyReportTranslator":
+    def from_env(cls, budget_config: Optional[LLMBudgetConfig] = None) -> "DailyReportTranslator":
         base_url = os.getenv("LLM_BASE_URL", "").strip()
         model = os.getenv("LLM_MODEL", "").strip()
         api_key = os.getenv("LLM_API_KEY", "").strip()
         if not base_url or not model or not api_key:
             raise RuntimeError("Missing LLM_BASE_URL, LLM_MODEL, or LLM_API_KEY for report generation")
-        return cls(base_url=base_url, model=model, api_key=api_key)
+        return cls(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            budget_config=budget_config or LLMBudgetConfig(),
+        )
+
+    def __post_init__(self) -> None:
+        self._budget = RollingCallBudget(self.budget_config)
 
     def _messages_url(self) -> str:
         base = self.base_url.rstrip("/")
@@ -333,6 +405,28 @@ class DailyReportTranslator:
     def _request_timeout(self, payload_chars: int) -> httpx.Timeout:
         total_timeout = max(self.timeout_seconds, min(180.0, 35.0 + (payload_chars / 220.0)))
         return httpx.Timeout(total_timeout, connect=20.0)
+
+    def build_execution_plan(self, report: dict[str, Any]) -> dict[str, int]:
+        remaining_calls = self._budget.remaining_calls()
+        usable_calls = max(1, remaining_calls - self.budget_config.reserve_calls)
+        target_shards = max(1, math.ceil(int(report.get("candidate_group_count", 0)) / self.budget_config.target_items_per_shard))
+        planned_shards = max(1, min(usable_calls, target_shards))
+        candidate_chars = int(report.get("candidate_payload_chars", 0))
+        if candidate_chars <= 0:
+            shard_char_budget = self.budget_config.max_shard_chars
+        else:
+            shard_char_budget = math.ceil(candidate_chars / planned_shards)
+            shard_char_budget = max(self.budget_config.min_shard_chars, shard_char_budget)
+            shard_char_budget = min(self.budget_config.max_shard_chars, shard_char_budget)
+        parallel_requests = max(1, min(self.budget_config.max_parallel_requests, planned_shards, usable_calls))
+        return {
+            "remaining_calls": remaining_calls,
+            "usable_calls": usable_calls,
+            "planned_shards": planned_shards,
+            "shard_char_budget": shard_char_budget,
+            "parallel_requests": parallel_requests,
+            "effective_call_limit": self.budget_config.effective_call_limit,
+        }
 
     def _request_text(self, *, system: str, user_content: str, max_tokens: int) -> str:
         payload = {
@@ -351,6 +445,7 @@ class DailyReportTranslator:
 
         for attempt in range(1, 4):
             try:
+                self._budget.acquire_slot()
                 with httpx.Client(timeout=timeout) as client:
                     response = client.post(self._messages_url(), headers=headers, json=payload)
                 if response.status_code == 429 or response.status_code >= 500:
@@ -416,27 +511,11 @@ class DailyReportTranslator:
 
     def compose_daily_markdown(self, summary: dict[str, Any]) -> str:
         system = (
-            "You write concise high-signal daily product reports in Simplified Chinese markdown. "
-            "Input is structured JSON merged from multiple 2-hour reports. "
-            "Use only facts in the JSON. Do not invent details. Preserve specificity."
+            "你是产品情报分析助手。"
+            "阅读用户提供的 JSON 数据，只根据 JSON 本身写出中文报告。"
+            "不要编造不存在的信息，不要输出 JSON，只输出中文报告正文。"
         )
-        user_content = (
-            "Write a markdown report with sections exactly in this order:\n"
-            "# 每日报告\n"
-            "## 今日概览\n"
-            "## 重点问题\n"
-            "## 产品机会\n"
-            "## 一般反馈\n"
-            "## 用户情绪\n"
-            "## 数据说明\n\n"
-            "Requirements:\n"
-            "- keep it concise but specific\n"
-            "- rank the most important issues first\n"
-            "- mention message counts and affected users where useful\n"
-            "- include short evidence bullets under major issues when present\n"
-            "- output markdown only\n\n"
-            f"Structured JSON:\n{json.dumps(summary, ensure_ascii=False)}"
-        )
+        user_content = f"把下面的JSON 总结成中文报告交给我：\n{json.dumps(summary, ensure_ascii=False)}"
         return self._request_text(system=system, user_content=user_content, max_tokens=4096).strip()
 
 
@@ -516,6 +595,18 @@ class DailyReportService:
             window_start=utc_start,
             window_end=utc_end,
         )
+        if self.translator is not None and bundle["report"]["candidate_group_count"] > 0:
+            initial_plan = self.translator.build_execution_plan(bundle["report"])
+            planned_budget = int(initial_plan["shard_char_budget"])
+            if planned_budget != bundle["report"].get("shard_char_budget", 12_000):
+                bundle = build_interval_pipeline_bundle_from_messages(
+                    messages=messages,
+                    report_date=report_date,
+                    timezone_name=self.timezone_name,
+                    window_start=utc_start,
+                    window_end=utc_end,
+                    shard_char_budget=planned_budget,
+                )
         report = bundle["report"]
         base_summary = {
             "report_date": report["report_date"],
@@ -546,20 +637,39 @@ class DailyReportService:
         if self.translator is None:
             raise RuntimeError("LLM translator is required for non-empty report generation")
 
+        execution_plan = self.translator.build_execution_plan(report)
         shard_summaries = []
         total_shards = len(bundle["shards"])
         if total_shards > 1:
             print(
                 f"[llm-shard] processing {total_shards} shards "
-                f"candidates={report['candidate_group_count']} raw_candidates={report.get('raw_candidate_group_count', report['candidate_group_count'])}"
+                f"candidates={report['candidate_group_count']} raw_candidates={report.get('raw_candidate_group_count', report['candidate_group_count'])} "
+                f"parallel={execution_plan['parallel_requests']} remaining_calls={execution_plan['remaining_calls']}/{execution_plan['effective_call_limit']}"
             )
-        for index, shard in enumerate(bundle["shards"], start=1):
-            if total_shards > 1:
-                print(
-                    f"[llm-shard] {index}/{total_shards} "
-                    f"items={len(shard['items'])} messages={shard['stats'].get('message_count', 0)}"
-                )
-            shard_summaries.append(self.translator.summarize_signal_shard(shard))
+        parallel_requests = int(execution_plan["parallel_requests"])
+        if parallel_requests <= 1 or total_shards <= 1:
+            for index, shard in enumerate(bundle["shards"], start=1):
+                if total_shards > 1:
+                    print(
+                        f"[llm-shard] {index}/{total_shards} "
+                        f"items={len(shard['items'])} messages={shard['stats'].get('message_count', 0)}"
+                    )
+                shard_summaries.append(self.translator.summarize_signal_shard(shard))
+        else:
+            shard_summaries = [None] * total_shards
+            with ThreadPoolExecutor(max_workers=parallel_requests) as executor:
+                future_map = {
+                    executor.submit(self.translator.summarize_signal_shard, shard): index
+                    for index, shard in enumerate(bundle["shards"], start=1)
+                }
+                for future in as_completed(future_map):
+                    index = future_map[future]
+                    shard = bundle["shards"][index - 1]
+                    print(
+                        f"[llm-shard] done {index}/{total_shards} "
+                        f"items={len(shard['items'])} messages={shard['stats'].get('message_count', 0)}"
+                    )
+                    shard_summaries[index - 1] = future.result()
         summary = dict(base_summary)
         summary["urgent_issues"] = _merge_section_items(shard_summaries, "urgent_issues")
         summary["product_opportunities"] = _merge_section_items(shard_summaries, "product_opportunities")
@@ -664,10 +774,18 @@ class DailyReportService:
             if summary["source_message_count"] == 0
             else render_daily_markdown(summary)
         )
+        llm_daily_payload = {
+            "kind": "daily_report_from_hourly_reports",
+            "report_date": report_date.isoformat(),
+            "timezone": self.timezone_name,
+            "window_start": _ensure_utc(expected_windows[0][1]).isoformat(),
+            "window_end": _ensure_utc(expected_windows[-1][2]).isoformat(),
+            "hourly_reports": [report.content_json or {} for report in hourly_reports],
+        }
         content_cn = (
             markdown
             if self.translator is None or summary["candidate_message_count"] == 0
-            else self.translator.compose_daily_markdown(summary)
+            else self.translator.compose_daily_markdown(llm_daily_payload)
         )
         now = datetime.now(tz=timezone.utc)
         payload = {
@@ -701,10 +819,18 @@ class DailyReportService:
             if summary["source_message_count"] == 0
             else render_daily_markdown(summary)
         )
+        llm_preview_payload = {
+            "kind": "today_so_far_preview",
+            "report_date": report_date.isoformat(),
+            "timezone": self.timezone_name,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "hourly_reports": [summary],
+        }
         content_cn = (
             markdown
             if self.translator is None or summary["candidate_message_count"] == 0
-            else self.translator.compose_daily_markdown(summary)
+            else self.translator.compose_daily_markdown(llm_preview_payload)
         )
         current_time = datetime.now(tz=timezone.utc)
         payload = {

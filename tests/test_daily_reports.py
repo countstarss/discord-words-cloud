@@ -9,6 +9,16 @@ from src.storage import Database
 
 
 class FakeTranslator:
+    def build_execution_plan(self, report: dict) -> dict:
+        return {
+            "remaining_calls": 999,
+            "usable_calls": 999,
+            "planned_shards": max(1, report.get("shard_count", 1)),
+            "shard_char_budget": report.get("shard_char_budget", 12_000),
+            "parallel_requests": 1,
+            "effective_call_limit": 999,
+        }
+
     def summarize_signal_shard(self, shard: dict) -> dict:
         urgent_issues = []
         product_opportunities = []
@@ -44,6 +54,8 @@ class FakeTranslator:
         }
 
     def compose_daily_markdown(self, summary: dict) -> str:
+        if "hourly_reports" in summary:
+            return "# 每日报告\n\n- 已根据 hourly_reports JSON 生成中文报告。"
         return render_daily_markdown(summary)
 
 
@@ -210,8 +222,7 @@ def test_daily_report_service_generates_hourly_and_daily_reports(tmp_path):
     assert stored.target_message_count == 2
     assert db.count_hourly_reports(report_date) == 12
     assert "每日报告" in stored.content_cn
-    assert "重点问题" in stored.content_cn
-    assert "产品机会" in stored.content_cn
+    assert "hourly_reports JSON" in stored.content_cn
 
 
 def test_generate_today_so_far_report_uses_today_window(tmp_path):

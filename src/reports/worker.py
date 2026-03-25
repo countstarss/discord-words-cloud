@@ -8,7 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from ..common import load_config
 from ..storage import init_db
-from .service import DailyReportService, DailyReportTranslator, SHANGHAI_TZ
+from .service import DailyReportService, DailyReportTranslator, LLMBudgetConfig, SHANGHAI_TZ
 
 
 def _database_url_from_config(config: dict) -> Optional[str]:
@@ -30,8 +30,14 @@ def _database_url_from_config(config: dict) -> Optional[str]:
 def _build_service(config_path: Optional[str] = None) -> DailyReportService:
     config = load_config(config_path)
     db = init_db(database_url=_database_url_from_config(config))
-    translator = DailyReportTranslator.from_env()
-    return DailyReportService(db=db, translator=translator)
+    reporting_cfg = config.get("reporting", {})
+    budget_config = LLMBudgetConfig.from_config(reporting_cfg.get("llm"))
+    translator = DailyReportTranslator.from_env(budget_config=budget_config)
+    return DailyReportService(
+        db=db,
+        translator=translator,
+        interval_hours=int(reporting_cfg.get("interval_hours", 2)),
+    )
 
 
 def _run_interval_job(service: DailyReportService) -> None:

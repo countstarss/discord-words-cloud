@@ -40,3 +40,16 @@ processor:
 web:
   host: 0.0.0.0
   port: 8080
+
+# Reporting / LLM settings
+reporting:
+  interval_hours: 2
+  llm:
+    quota_per_5h: 600
+    utilization_ratio: 0.8
+    window_hours: 5
+    max_parallel_requests: 6
+    target_items_per_shard: 18
+    min_shard_chars: 6000
+    max_shard_chars: 16000
+    reserve_calls: 24
