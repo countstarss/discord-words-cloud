@@ -39,11 +39,11 @@ def test_api_import():
 
 def test_reports_import():
     """Test that daily report modules can be imported."""
-    from src.reports import DailyReportService, DailyReportTranslator, run_daily_report_once_now, run_daily_report_worker
+    from src.reports import DailyReportService, DailyReportTranslator, run_daily_report_for_date, run_daily_report_worker
 
     assert DailyReportService is not None
     assert DailyReportTranslator is not None
-    assert run_daily_report_once_now is not None
+    assert run_daily_report_for_date is not None
     assert run_daily_report_worker is not None
 
 

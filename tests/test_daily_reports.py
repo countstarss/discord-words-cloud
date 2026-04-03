@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from src.pipeline import build_interval_pipeline_bundle_from_dataframe
-from src.reports.service import DailyReportService, ReportScope, SHANGHAI_TZ, render_daily_markdown
+from src.reports.service import DailyReportService, ReportScope, SHANGHAI_TZ, build_report_scopes, render_daily_markdown
 from src.storage import Database
 
 
@@ -14,7 +14,7 @@ class FakeTranslator:
             "remaining_calls": 999,
             "usable_calls": 999,
             "planned_shards": max(1, report.get("shard_count", 1)),
-            "shard_char_budget": report.get("shard_char_budget", 12_000),
+            "shard_char_budget": report.get("shard_char_budget", 28_000),
             "parallel_requests": 1,
             "effective_call_limit": 999,
         }
@@ -31,7 +31,7 @@ class FakeTranslator:
                 "category": next(iter(hints), "other"),
                 "priority": "medium",
                 "title": content[:18],
-                "summary": f"围绕“{content[:12]}”形成了集中讨论。",
+                "summary": f"围绕\u201c{content[:12]}\u201d形成了集中讨论。",
                 "message_count": item["message_count"],
                 "unique_user_count": item["unique_user_count"],
                 "channel_ids": [item["channel_id"]],
@@ -76,7 +76,7 @@ class FakeTranslator:
         source_message_count: int,
         candidate_message_count: int,
         active_user_count: int,
-        max_batch_chars: int = 18_000,
+        max_batch_chars: int = 40_000,
         depth: int = 0,
     ) -> str:
         del window_start, window_end, max_batch_chars, depth
@@ -105,6 +105,24 @@ def _make_db(tmp_path) -> Database:
     return db
 
 
+TH_CHANNEL_SCOPE = ReportScope(
+    scope_type="channel",
+    scope_key="th:10",
+    region_key="th",
+    region_name="泰国",
+    channel_id=10,
+    channel_name="聊天室",
+)
+TH_REGION_SCOPE = ReportScope(
+    scope_type="region",
+    scope_key="th",
+    region_key="th",
+    region_name="泰国",
+    channel_id=0,
+    channel_name="泰国 全部频道",
+)
+
+
 def _message_payload(
     message_id: int,
     content: str,
@@ -112,9 +130,9 @@ def _message_payload(
     detected_language: str = "th",
     *,
     channel_id: int = 10,
-    region_key: str = "default",
-    region_name: str = "Default",
-    channel_name: str = "channel 10",
+    region_key: str = "th",
+    region_name: str = "泰国",
+    channel_name: str = "聊天室",
     channel_group: str = "chat",
 ) -> dict:
     return {
@@ -148,6 +166,11 @@ def test_hourly_report_upsert_is_idempotent(tmp_path):
     payload = {
         "report_date": date(2026, 3, 24),
         "timezone": "Asia/Shanghai",
+        "scope_type": "channel",
+        "scope_key": "th:10",
+        "region_key": "th",
+        "channel_id": 10,
+        "channel_name": "聊天室",
         "window_start": datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
         "window_end": datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
         "content_json": {"urgent_issues": []},
@@ -162,7 +185,7 @@ def test_hourly_report_upsert_is_idempotent(tmp_path):
     payload["candidate_message_count"] = 8
     second = db.upsert_hourly_report(payload)
 
-    reports = db.get_hourly_reports_for_date(date(2026, 3, 24))
+    reports = db.get_hourly_reports_for_date(date(2026, 3, 24), scope_key="th:10")
     assert first.id == second.id
     assert len(reports) == 1
     assert reports[0].candidate_message_count == 8
@@ -227,7 +250,8 @@ def test_pipeline_filters_noise_and_shards_payload():
     assert result["candidates"][0]["signal_score"] >= result["candidates"][1]["signal_score"]
 
 
-def test_daily_report_service_generates_hourly_and_daily_reports(tmp_path):
+def test_channel_hourly_to_region_daily_full_flow(tmp_path):
+    """End-to-end: channel hourly reports → region daily report."""
     db = _make_db(tmp_path)
     report_date = date(2026, 3, 24)
 
@@ -246,57 +270,34 @@ def test_daily_report_service_generates_hourly_and_daily_reports(tmp_path):
         )
     )
 
-    service = DailyReportService(db=db, translator=FakeTranslator())
+    scopes = [TH_CHANNEL_SCOPE, TH_REGION_SCOPE]
+    service = DailyReportService(db=db, translator=FakeTranslator(), scopes=scopes)
+
+    # Generate channel hourly reports
     service.generate_hourly_report_for_window(
         report_date,
         datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
         datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+        scope=TH_CHANNEL_SCOPE,
     )
     service.generate_hourly_report_for_window(
         report_date,
         datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
         datetime(2026, 3, 23, 20, 0, tzinfo=timezone.utc),
+        scope=TH_CHANNEL_SCOPE,
     )
 
-    report = service.generate_daily_report_from_hourly_reports(report_date)
-    stored = db.get_daily_report_by_date(report_date)
+    # Generate region daily report from channel hourly reports
+    report = service.generate_daily_report_from_hourly_reports(report_date, scope=TH_REGION_SCOPE)
+    stored = db.get_daily_report_by_date(report_date, scope_key="th")
 
     assert report.id == stored.id
     assert stored.source_message_count == 2
     assert stored.candidate_message_count == 2
-    assert db.count_hourly_reports(report_date) == 2
+    assert stored.scope_type == "region"
+    assert stored.scope_key == "th"
     assert "每日报告" in stored.content_cn
     assert "hourly_reports JSON" in stored.content_cn
-
-
-def test_generate_today_so_far_report_uses_today_window(tmp_path):
-    db = _make_db(tmp_path)
-    now = datetime(2026, 3, 24, 12, 30, tzinfo=SHANGHAI_TZ)
-
-    db.upsert_message(
-        _message_payload(
-            message_id=1,
-            content="เมื่อวานมีบัคแต่วันนี้หายแล้ว",
-            created_at=datetime(2026, 3, 23, 15, 59, tzinfo=timezone.utc),
-        )
-    )
-    db.upsert_message(
-        _message_payload(
-            message_id=2,
-            content="วันนี้เข้าไม่ได้หลังอัปเดต",
-            created_at=datetime(2026, 3, 24, 1, 0, tzinfo=timezone.utc),
-        )
-    )
-
-    service = DailyReportService(db=db, translator=FakeTranslator())
-    report = service.generate_today_so_far_report(now=now)
-
-    stored = db.get_daily_report_by_date(date(2026, 3, 24))
-    assert report.id == stored.id
-    assert stored.source_message_count == 1
-    assert stored.candidate_message_count == 1
-    assert stored.window_start.replace(tzinfo=timezone.utc) == datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc)
-    assert stored.window_end.replace(tzinfo=timezone.utc) == now.astimezone(timezone.utc)
 
 
 def test_previous_day_and_interval_windows_use_shanghai_calendar():
@@ -317,16 +318,19 @@ def test_previous_day_and_interval_windows_use_shanghai_calendar():
     assert interval_end == datetime(2026, 3, 24, 2, 0, tzinfo=timezone.utc)
 
 
-def test_channel_scoped_reports_are_generated_separately(tmp_path):
+def test_channel_hourly_reports_generated_per_channel(tmp_path):
+    """Hourly reports are generated per-channel only (no global)."""
     db = _make_db(tmp_path)
     report_date = date(2026, 3, 24)
+    ch1 = 1400146275512352799
+    ch2 = 1400147594625290370
 
     db.upsert_message(
         _message_payload(
             message_id=11,
             content="อัปเดตแล้วส่งข้อความไม่ได้",
             created_at=datetime(2026, 3, 23, 16, 20, tzinfo=timezone.utc),
-            channel_id=1400146275512352799,
+            channel_id=ch1,
             region_key="th",
             region_name="泰国",
             channel_name="聊天室",
@@ -337,7 +341,7 @@ def test_channel_scoped_reports_are_generated_separately(tmp_path):
             message_id=12,
             content="อยากให้เพิ่มประวัติการสนทนา",
             created_at=datetime(2026, 3, 23, 16, 50, tzinfo=timezone.utc),
-            channel_id=1400147594625290370,
+            channel_id=ch2,
             region_key="th",
             region_name="泰国",
             channel_name="Rubii反馈",
@@ -346,22 +350,29 @@ def test_channel_scoped_reports_are_generated_separately(tmp_path):
     )
 
     scopes = [
-        ReportScope(scope_type="global", scope_key="global"),
         ReportScope(
             scope_type="channel",
-            scope_key="th:1400146275512352799",
+            scope_key=f"th:{ch1}",
             region_key="th",
             region_name="泰国",
-            channel_id=1400146275512352799,
+            channel_id=ch1,
             channel_name="聊天室",
         ),
         ReportScope(
             scope_type="channel",
-            scope_key="th:1400147594625290370",
+            scope_key=f"th:{ch2}",
             region_key="th",
             region_name="泰国",
-            channel_id=1400147594625290370,
+            channel_id=ch2,
             channel_name="Rubii反馈",
+        ),
+        ReportScope(
+            scope_type="region",
+            scope_key="th",
+            region_key="th",
+            region_name="泰国",
+            channel_id=0,
+            channel_name="泰国 全部频道",
         ),
     ]
     service = DailyReportService(db=db, translator=FakeTranslator(), scopes=scopes)
@@ -371,24 +382,22 @@ def test_channel_scoped_reports_are_generated_separately(tmp_path):
         datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
     )
 
-    assert len(reports) == 3
-    global_report = db.get_hourly_report_by_window(
-        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
-        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
-        scope_key="global",
-    )
+    # Only channel scopes get hourly reports (no global, no region)
+    assert len(reports) == 2
+    scope_types = {r.scope_type for r in reports}
+    assert scope_types == {"channel"}
+
     chat_report = db.get_hourly_report_by_window(
         datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
         datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
-        scope_key="th:1400146275512352799",
+        scope_key=f"th:{ch1}",
     )
     feedback_report = db.get_hourly_report_by_window(
         datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
         datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
-        scope_key="th:1400147594625290370",
+        scope_key=f"th:{ch2}",
     )
 
-    assert global_report is not None and global_report.source_message_count == 2
     assert chat_report is not None and chat_report.source_message_count == 1
     assert feedback_report is not None and feedback_report.source_message_count == 1
     assert feedback_report.channel_name == "Rubii反馈"
@@ -412,61 +421,222 @@ def test_hourly_report_survives_flaky_shard_response(tmp_path):
         )
     )
 
-    service = DailyReportService(db=db, translator=FlakyTranslator())
+    service = DailyReportService(db=db, translator=FlakyTranslator(), scopes=[TH_CHANNEL_SCOPE, TH_REGION_SCOPE])
     report = service.generate_hourly_report_for_window(
+        report_date,
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+        scope=TH_CHANNEL_SCOPE,
+    )
+
+    assert report.source_message_count == 2
+    assert report.candidate_message_count == 2
+
+
+def test_build_report_scopes_no_global():
+    targets = {
+        "regions": [
+            {
+                "key": "th",
+                "name": "泰国",
+                "channels": [
+                    {"id": 100, "name": "聊天室"},
+                    {"id": 200, "name": "Rubii反馈"},
+                ],
+            },
+            {
+                "key": "jp",
+                "name": "日本",
+                "channels": [
+                    {"id": 300, "name": "雑談"},
+                ],
+            },
+        ]
+    }
+    scopes = build_report_scopes(targets)
+    scope_types = [s.scope_type for s in scopes]
+    assert scope_types.count("global") == 0
+    assert scope_types.count("channel") == 3
+    assert scope_types.count("region") == 2
+
+    region_scopes = [s for s in scopes if s.scope_type == "region"]
+    assert {s.scope_key for s in region_scopes} == {"th", "jp"}
+    assert region_scopes[0].display_name == "泰国 国区"
+
+
+def test_build_report_scopes_matches_real_config():
+    """Verify the 6-region config produces exactly 6 region scopes."""
+    targets = {
+        "regions": [
+            {"key": "cn", "name": "中文", "channels": [{"id": 1, "name": "聊天室"}, {"id": 2, "name": "Bug报错"}]},
+            {"key": "cn-zh", "name": "繁体中文", "channels": [{"id": 3, "name": "聊天室"}, {"id": 4, "name": "Bug报错"}]},
+            {"key": "th", "name": "泰国", "channels": [{"id": 5, "name": "聊天室"}, {"id": 6, "name": "Bug报错"}]},
+            {"key": "en", "name": "English", "channels": [{"id": 7, "name": "聊天室"}, {"id": 8, "name": "report-bugs"}]},
+            {"key": "jp", "name": "日本", "channels": [{"id": 9, "name": "聊天室"}]},
+            {"key": "kr", "name": "韩国", "channels": [{"id": 10, "name": "聊天室"}]},
+        ]
+    }
+    scopes = build_report_scopes(targets)
+    region_scopes = [s for s in scopes if s.scope_type == "region"]
+    channel_scopes = [s for s in scopes if s.scope_type == "channel"]
+    assert len(region_scopes) == 6
+    assert len(channel_scopes) == 10
+    assert {s.scope_key for s in region_scopes} == {"cn", "cn-zh", "th", "en", "jp", "kr"}
+
+
+def test_region_daily_report_merges_channel_hourly_reports(tmp_path):
+    db = _make_db(tmp_path)
+    report_date = date(2026, 3, 24)
+    region_key = "th"
+    ch1 = 1400146275512352799
+    ch2 = 1400147594625290370
+
+    db.upsert_message(
+        _message_payload(
+            message_id=51,
+            content="อัปเดตแล้วส่งข้อความไม่ได้",
+            created_at=datetime(2026, 3, 23, 16, 20, tzinfo=timezone.utc),
+            channel_id=ch1,
+            region_key=region_key,
+            region_name="泰国",
+            channel_name="聊天室",
+        )
+    )
+    db.upsert_message(
+        _message_payload(
+            message_id=52,
+            content="อยากให้เพิ่มประวัติการสนทนา",
+            created_at=datetime(2026, 3, 23, 16, 50, tzinfo=timezone.utc),
+            channel_id=ch2,
+            region_key=region_key,
+            region_name="泰国",
+            channel_name="Rubii反馈",
+            channel_group="feedback",
+        )
+    )
+
+    scopes = [
+        ReportScope(
+            scope_type="channel",
+            scope_key=f"{region_key}:{ch1}",
+            region_key=region_key,
+            region_name="泰国",
+            channel_id=ch1,
+            channel_name="聊天室",
+        ),
+        ReportScope(
+            scope_type="channel",
+            scope_key=f"{region_key}:{ch2}",
+            region_key=region_key,
+            region_name="泰国",
+            channel_id=ch2,
+            channel_name="Rubii反馈",
+        ),
+        ReportScope(
+            scope_type="region",
+            scope_key=region_key,
+            region_key=region_key,
+            region_name="泰国",
+            channel_id=0,
+            channel_name="泰国 全部频道",
+        ),
+    ]
+    service = DailyReportService(db=db, translator=FakeTranslator(), scopes=scopes)
+
+    # Generate channel-level hourly reports (region scopes are skipped)
+    hourly_reports = service.generate_hourly_reports_for_window(
+        report_date,
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+    )
+    assert len(hourly_reports) == 2  # 2 channels only
+    assert all(r.scope_type == "channel" for r in hourly_reports)
+
+    # Generate region daily report from channel hourly reports
+    region_scope = scopes[2]
+    region_daily = service.generate_daily_report_from_hourly_reports(report_date, scope=region_scope)
+
+    assert region_daily.scope_key == region_key
+    assert region_daily.scope_type == "region"
+    assert region_daily.source_message_count == 2
+    assert region_daily.candidate_message_count == 2
+    assert "每日报告" in region_daily.content_cn
+
+    # Verify it's stored correctly
+    stored = db.get_daily_report_by_date(report_date, scope_key=region_key)
+    assert stored is not None
+    assert stored.source_message_count == 2
+
+
+def test_iter_scopes_filters_correctly():
+    scopes = [
+        ReportScope(scope_type="channel", scope_key="th:100", region_key="th", region_name="泰国", channel_id=100, channel_name="聊天室"),
+        ReportScope(scope_type="channel", scope_key="th:200", region_key="th", region_name="泰国", channel_id=200, channel_name="Bug报错"),
+        ReportScope(scope_type="region", scope_key="th", region_key="th", region_name="泰国", channel_id=0, channel_name="泰国 全部频道"),
+    ]
+    service = DailyReportService(
+        db=Database("sqlite+pysqlite:///:memory:"),
+        translator=FakeTranslator(),
+        scopes=scopes,
+    )
+    # hourly: channel only
+    assert len(service.iter_hourly_scopes()) == 2
+    assert all(s.scope_type == "channel" for s in service.iter_hourly_scopes())
+    # daily: region only
+    assert len(service.iter_daily_scopes()) == 1
+    assert service.iter_daily_scopes()[0].scope_type == "region"
+    # helper
+    assert len(service.get_channel_scopes_for_region("th")) == 2
+
+
+def test_generate_daily_reports_for_date_produces_region_reports(tmp_path):
+    """generate_daily_reports_for_date only produces region reports."""
+    db = _make_db(tmp_path)
+    report_date = date(2026, 3, 24)
+    ch1 = 100
+    ch2 = 200
+
+    db.upsert_message(
+        _message_payload(
+            message_id=61,
+            content="อัปเดตแล้วเปิดไม่ได้เลย",
+            created_at=datetime(2026, 3, 23, 16, 10, tzinfo=timezone.utc),
+            channel_id=ch1,
+            region_key="th",
+            region_name="泰国",
+            channel_name="聊天室",
+        )
+    )
+    db.upsert_message(
+        _message_payload(
+            message_id=62,
+            content="กดตรงไหนถึงจะเข้า ai ได้",
+            created_at=datetime(2026, 3, 23, 16, 30, tzinfo=timezone.utc),
+            channel_id=ch2,
+            region_key="th",
+            region_name="泰国",
+            channel_name="Bug报错",
+            channel_group="bug",
+        )
+    )
+
+    scopes = [
+        ReportScope(scope_type="channel", scope_key=f"th:{ch1}", region_key="th", region_name="泰国", channel_id=ch1, channel_name="聊天室"),
+        ReportScope(scope_type="channel", scope_key=f"th:{ch2}", region_key="th", region_name="泰国", channel_id=ch2, channel_name="Bug报错"),
+        ReportScope(scope_type="region", scope_key="th", region_key="th", region_name="泰国", channel_id=0, channel_name="泰国 全部频道"),
+    ]
+    service = DailyReportService(db=db, translator=FakeTranslator(), scopes=scopes)
+
+    # First generate hourly (channel level)
+    service.generate_hourly_reports_for_window(
         report_date,
         datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
         datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
     )
 
-    assert report.source_message_count == 2
-    assert report.candidate_message_count == 2
-
-
-def test_generate_channel_today_text_report(tmp_path):
-    db = _make_db(tmp_path)
-    now = datetime(2026, 3, 24, 12, 30, tzinfo=SHANGHAI_TZ)
-    channel_id = 1400146275512352799
-    region_key = "th"
-
-    db.upsert_message(
-        _message_payload(
-            message_id=41,
-            content="อัปเดตแล้วเข้าไม่ได้ ต้องลงใหม่",
-            created_at=datetime(2026, 3, 24, 1, 10, tzinfo=timezone.utc),
-            channel_id=channel_id,
-            region_key=region_key,
-            region_name="泰国",
-            channel_name="聊天室",
-        )
-    )
-    db.upsert_message(
-        _message_payload(
-            message_id=42,
-            content="กดตรงไหนถึงจะเข้า code ai ได้",
-            created_at=datetime(2026, 3, 24, 2, 0, tzinfo=timezone.utc),
-            channel_id=channel_id,
-            region_key=region_key,
-            region_name="泰国",
-            channel_name="聊天室",
-        )
-    )
-
-    scopes = [
-        ReportScope(scope_type="global", scope_key="global"),
-        ReportScope(
-            scope_type="channel",
-            scope_key=f"{region_key}:{channel_id}",
-            region_key=region_key,
-            region_name="泰国",
-            channel_id=channel_id,
-            channel_name="聊天室",
-        ),
-    ]
-    service = DailyReportService(db=db, translator=FakeTranslator(), scopes=scopes)
-    report = service.generate_channel_today_text_report(channel_id=channel_id, now=now)
-
-    assert report.scope_key == f"{region_key}:{channel_id}"
-    assert report.source_message_count == 2
-    assert report.candidate_message_count == 2
-    assert "泰国 / 聊天室" in report.content_cn
+    # Now generate daily (region level only)
+    daily_reports = service.generate_daily_reports_for_date(report_date)
+    assert len(daily_reports) == 1
+    assert daily_reports[0].scope_type == "region"
+    assert daily_reports[0].scope_key == "th"
+    assert daily_reports[0].source_message_count == 2

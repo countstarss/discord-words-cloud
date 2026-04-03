@@ -42,20 +42,25 @@ class ReportScope:
     def display_name(self) -> str:
         if self.scope_type == "global":
             return "全部频道"
+        if self.scope_type == "region":
+            return f"{self.region_name} 国区"
         return f"{self.region_name} / {self.channel_name}"
 
 
 def build_report_scopes(targets: Optional[dict[str, Any]]) -> list[ReportScope]:
-    scopes = [ReportScope(scope_type="global", scope_key="global")]
+    scopes: list[ReportScope] = []
     targets = targets or {}
-    seen = {"global"}
+    seen: set[str] = set()
     for region in targets.get("regions", []) or []:
         region_key = str(region.get("key") or "__all__").strip() or "__all__"
         region_name = str(region.get("name") or region_key or "Region").strip()
-        for channel in region.get("channels", []) or []:
+        channels = region.get("channels", []) or []
+        has_channels = False
+        for channel in channels:
             channel_id = int(channel.get("id") or 0)
             if channel_id <= 0:
                 continue
+            has_channels = True
             scope_key = f"{region_key}:{channel_id}"
             if scope_key in seen:
                 continue
@@ -68,6 +73,18 @@ def build_report_scopes(targets: Optional[dict[str, Any]]) -> list[ReportScope]:
                     region_name=region_name,
                     channel_id=channel_id,
                     channel_name=str(channel.get("name") or f"channel {channel_id}").strip(),
+                )
+            )
+        if has_channels and region_key not in seen:
+            seen.add(region_key)
+            scopes.append(
+                ReportScope(
+                    scope_type="region",
+                    scope_key=region_key,
+                    region_key=region_key,
+                    region_name=region_name,
+                    channel_id=0,
+                    channel_name=f"{region_name} 全部频道",
                 )
             )
     return scopes
@@ -427,9 +444,9 @@ class LLMBudgetConfig:
     window_hours: int = 5
     max_parallel_requests: int = 24
     max_scope_workers: int = 6
-    target_items_per_shard: int = 12
-    min_shard_chars: int = 4_000
-    max_shard_chars: int = 14_000
+    target_items_per_shard: int = 28
+    min_shard_chars: int = 6_000
+    max_shard_chars: int = 32_000
     reserve_calls: int = 120
 
     @property
@@ -445,9 +462,9 @@ class LLMBudgetConfig:
             window_hours=int(raw.get("window_hours", 5)),
             max_parallel_requests=max(1, int(raw.get("max_parallel_requests", 24))),
             max_scope_workers=max(1, int(raw.get("max_scope_workers", 6))),
-            target_items_per_shard=max(1, int(raw.get("target_items_per_shard", 12))),
-            min_shard_chars=max(2_000, int(raw.get("min_shard_chars", 4_000))),
-            max_shard_chars=max(4_000, int(raw.get("max_shard_chars", 14_000))),
+            target_items_per_shard=max(1, int(raw.get("target_items_per_shard", 28))),
+            min_shard_chars=max(2_000, int(raw.get("min_shard_chars", 6_000))),
+            max_shard_chars=max(4_000, int(raw.get("max_shard_chars", 32_000))),
             reserve_calls=max(0, int(raw.get("reserve_calls", 120))),
         )
 
@@ -672,7 +689,7 @@ class DailyReportTranslator:
         source_message_count: int,
         candidate_message_count: int,
         active_user_count: int,
-        max_batch_chars: int = 18_000,
+        max_batch_chars: int = 40_000,
         depth: int = 0,
     ) -> str:
         cleaned_reports = [text.strip() for text in shard_reports if str(text or "").strip()]
@@ -765,7 +782,7 @@ class DailyReportService:
         self.timezone_name = timezone_name
         self.local_tz = ZoneInfo(timezone_name)
         self.interval_hours = interval_hours
-        self.scopes = scopes or [ReportScope(scope_type="global", scope_key="global")]
+        self.scopes = scopes or []
 
     def _max_scope_workers(self) -> int:
         if self.translator is None:
@@ -780,6 +797,21 @@ class DailyReportService:
         if include_global:
             return list(self.scopes)
         return [scope for scope in self.scopes if scope.scope_type != "global"]
+
+    def iter_hourly_scopes(self) -> list[ReportScope]:
+        """Return scopes that need hourly reports (channel only, NOT region)."""
+        return [scope for scope in self.scopes if scope.scope_type == "channel"]
+
+    def iter_daily_scopes(self) -> list[ReportScope]:
+        """Return scopes that need daily reports (region only)."""
+        return [scope for scope in self.scopes if scope.scope_type == "region"]
+
+    def get_channel_scopes_for_region(self, region_key: str) -> list[ReportScope]:
+        """Return all channel scopes belonging to a given region."""
+        return [
+            scope for scope in self.scopes
+            if scope.scope_type == "channel" and scope.region_key == region_key
+        ]
 
     def get_scope_for_channel(self, channel_id: int) -> ReportScope:
         for scope in self.iter_scopes(include_global=False):
@@ -924,12 +956,19 @@ class DailyReportService:
         scope = scope or ReportScope(scope_type="global", scope_key="global")
         utc_start = _ensure_utc(window_start)
         utc_end = _ensure_utc(window_end)
-        messages = self.db.get_messages_for_window(
-            utc_start,
-            utc_end,
-            channel_id=scope.channel_id or None,
-            scope_key=scope.scope_key if scope.scope_type != "global" else None,
-        )
+        if scope.scope_type == "region":
+            messages = self.db.get_messages_for_window(
+                utc_start,
+                utc_end,
+                region_key=scope.region_key,
+            )
+        else:
+            messages = self.db.get_messages_for_window(
+                utc_start,
+                utc_end,
+                channel_id=scope.channel_id or None,
+                scope_key=scope.scope_key if scope.scope_type != "global" else None,
+            )
         if not messages:
             return build_empty_summary(
                 report_date=report_date,
@@ -1075,17 +1114,18 @@ class DailyReportService:
         window_start: datetime,
         window_end: datetime,
     ) -> list[Any]:
+        hourly_scopes = self.iter_hourly_scopes()
         results: list[Any] = []
-        scope_workers = min(len(self.scopes), self._max_scope_workers())
-        if scope_workers <= 1 or len(self.scopes) <= 1:
-            for scope in self.scopes:
+        scope_workers = min(len(hourly_scopes), self._max_scope_workers())
+        if scope_workers <= 1 or len(hourly_scopes) <= 1:
+            for scope in hourly_scopes:
                 results.append(self.generate_hourly_report_for_window(report_date, window_start, window_end, scope=scope))
             return results
 
         with ThreadPoolExecutor(max_workers=scope_workers) as executor:
             future_map = {
                 executor.submit(self.generate_hourly_report_for_window, report_date, window_start, window_end, scope): scope
-                for scope in self.scopes
+                for scope in hourly_scopes
             }
             for future in as_completed(future_map):
                 scope = future_map[future]
@@ -1111,12 +1151,19 @@ class DailyReportService:
 
         window_start = min(report.window_start for report in hourly_reports)
         window_end = max(report.window_end for report in hourly_reports)
-        messages = self.db.get_messages_for_window(
-            window_start,
-            window_end,
-            channel_id=scope.channel_id or None,
-            scope_key=scope.scope_key if scope.scope_type != "global" else None,
-        )
+        if scope.scope_type == "region":
+            messages = self.db.get_messages_for_window(
+                window_start,
+                window_end,
+                region_key=scope.region_key,
+            )
+        else:
+            messages = self.db.get_messages_for_window(
+                window_start,
+                window_end,
+                channel_id=scope.channel_id or None,
+                scope_key=scope.scope_key if scope.scope_type != "global" else None,
+            )
         filter_details: dict[str, int] = {}
         channel_ids = set()
         for report in hourly_reports:
@@ -1160,7 +1207,10 @@ class DailyReportService:
 
     def generate_daily_report_from_hourly_reports(self, report_date: date, scope: Optional[ReportScope] = None):
         scope = scope or ReportScope(scope_type="global", scope_key="global")
-        hourly_reports = self.db.get_hourly_reports_for_date(report_date, scope_key=scope.scope_key)
+        if scope.scope_type == "region":
+            hourly_reports = self.db.get_hourly_reports_for_date_by_region(report_date, region_key=scope.region_key)
+        else:
+            hourly_reports = self.db.get_hourly_reports_for_date(report_date, scope_key=scope.scope_key)
         expected_windows = self.iter_interval_windows_for_date(report_date)
         summary = self._merge_hourly_reports(report_date, hourly_reports, scope=scope)
         markdown = (
@@ -1212,16 +1262,17 @@ class DailyReportService:
         return self.generate_daily_report_from_hourly_reports(report_date)
 
     def generate_daily_reports_for_date(self, report_date: date) -> list[Any]:
+        daily_scopes = self.iter_daily_scopes()
         results: list[Any] = []
-        scope_workers = min(len(self.scopes), self._max_scope_workers())
-        if scope_workers <= 1 or len(self.scopes) <= 1:
-            for scope in self.scopes:
+        scope_workers = min(len(daily_scopes), self._max_scope_workers())
+        if scope_workers <= 1 or len(daily_scopes) <= 1:
+            for scope in daily_scopes:
                 results.append(self.generate_daily_report_from_hourly_reports(report_date, scope=scope))
             return results
         with ThreadPoolExecutor(max_workers=scope_workers) as executor:
             future_map = {
                 executor.submit(self.generate_daily_report_from_hourly_reports, report_date, scope): scope
-                for scope in self.scopes
+                for scope in daily_scopes
             }
             for future in as_completed(future_map):
                 scope = future_map[future]

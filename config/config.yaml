@@ -53,7 +53,7 @@ reporting:
     window_hours: 5
     max_parallel_requests: 24
     max_scope_workers: 6
-    target_items_per_shard: 12
-    min_shard_chars: 4000
-    max_shard_chars: 14000
+    target_items_per_shard: 28
+    min_shard_chars: 6000
+    max_shard_chars: 32000
     reserve_calls: 120
