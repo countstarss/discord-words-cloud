@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "components/ui.html" import empty_state, panel_heading %}
+
+{% block content %}
+<section class="content-grid content-grid--export">
+  <article class="panel panel-section">
+    {{ panel_heading("Export", "Export daily reports as Markdown and hourly reports as JSON. Only reports with Messages > 0 and Candidates > 0 are shown.") }}
+
+    <div class="field-group">
+      <label class="field-label" for="reportType">Report Type</label>
+      <select id="reportType" class="select-control">
+        <option value="daily">Daily reports</option>
+        <option value="hourly">Hourly reports</option>
+      </select>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label" for="scopeSelect">Scope</label>
+      <select id="scopeSelect" class="select-control"></select>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label" for="reportDate">Date</label>
+      <select id="reportDate" class="select-control"></select>
+    </div>
+
+    <div class="action-stack">
+      <button type="button" class="action-button action-button-primary" id="exportSelected">Export selected</button>
+      <button type="button" class="action-button" id="selectAllVisible">Select all visible</button>
+      <button type="button" class="action-button" id="clearSelection">Clear selection</button>
+    </div>
+  </article>
+
+  <article class="panel panel-section panel-section--fill">
+    <div class="export-shell">
+      <div class="export-header">
+        <div>
+          <strong id="exportTitle">Export reports</strong>
+          <span id="exportMeta">Choose report type, scope, and date to load exportable reports.</span>
+        </div>
+        <div class="export-summary">
+          <span id="selectedCount">0 selected</span>
+        </div>
+      </div>
+
+      <div class="export-list" id="exportList">
+        {{ empty_state("Loading exportable reports...") }}
+      </div>
+    </div>
+  </article>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/export.js') }}"></script>
+{% endblock %}

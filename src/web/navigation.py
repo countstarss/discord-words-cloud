@@ -24,4 +24,11 @@ PRIMARY_NAV_ITEMS = [
         "description": "Browse collected messages by channel and date",
         "short": "MS",
     },
+    {
+        "key": "export",
+        "endpoint": "export.index",
+        "label": "Export",
+        "description": "Export daily or hourly reports",
+        "short": "EX",
+    },
 ]

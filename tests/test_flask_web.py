@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class FlaskWebTests(unittest.TestCase):
@@ -21,6 +22,7 @@ class FlaskWebTests(unittest.TestCase):
 
         self.assertTrue((template_root / "base.html").exists())
         self.assertTrue((template_root / "dashboard" / "index.html").exists())
+        self.assertTrue((template_root / "export" / "index.html").exists())
         self.assertTrue((template_root / "messages" / "index.html").exists())
         self.assertTrue((template_root / "reports" / "index.html").exists())
         self.assertTrue((template_root / "components" / "sidebar.html").exists())
@@ -63,6 +65,18 @@ class FlaskWebTests(unittest.TestCase):
         self.assertIn('id="reportDate"', html)
         self.assertIn('id="messageList"', html)
         self.assertIn("Messages", html)
+
+    def test_export_route_renders_export_layout(self):
+        app = self._create_app()
+        with app.test_client() as client:
+            response = client.get("/export")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="reportType"', html)
+        self.assertIn('id="scopeSelect"', html)
+        self.assertIn('id="exportList"', html)
+        self.assertIn("Export", html)
 
     def test_messages_endpoint_delegates_to_existing_logic(self):
         app = self._create_app()
@@ -121,6 +135,66 @@ class FlaskWebTests(unittest.TestCase):
         self.assertEqual(response.get_json(), {"reports": [{"report_date": "2026-03-26", "content_html": "<h1>Title</h1>"}]})
         mock_get_reports.assert_called_once_with(scope_key="global")
         mock_enrich.assert_called_once_with(expected)
+
+    def test_export_catalog_endpoint_uses_catalog_helper(self):
+        app = self._create_app()
+        expected = {"items": [], "available_scopes": [], "available_dates": [], "selected_scope": "__all__"}
+
+        with patch("src.web.blueprints.export._catalog_payload", return_value=expected) as mock_catalog:
+            with app.test_client() as client:
+                response = client.get("/api/export/catalog?report_type=hourly&scope_key=global&report_date=2026-04-03")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), expected)
+        mock_catalog.assert_called_once_with("hourly", "global", "2026-04-03")
+
+    def test_export_download_endpoint_uses_download_helper(self):
+        app = self._create_app()
+
+        with patch("src.web.blueprints.export._download_response", return_value=app.response_class("ok", status=200)) as mock_download:
+            with app.test_client() as client:
+                response = client.post("/export/download", json={"items": [{"report_type": "daily", "id": 1}]})
+
+        self.assertEqual(response.status_code, 200)
+        mock_download.assert_called_once_with([{"report_type": "daily", "id": 1}])
+
+    def test_export_catalog_uses_non_empty_filter_for_daily_reports(self):
+        from src.web.blueprints.export import _catalog_payload
+
+        mock_db = Mock()
+        mock_db.get_daily_report_dates.return_value = [date(2026, 4, 3)]
+        mock_db.list_daily_reports.return_value = []
+
+        with patch("src.web.blueprints.export.get_db", return_value=mock_db):
+            with patch("src.web.blueprints.export._configured_export_scopes", return_value=[]):
+                payload = _catalog_payload("daily", "global", None)
+
+        self.assertEqual(payload["report_type"], "daily")
+        mock_db.get_daily_report_dates.assert_called_once_with(scope_key="global", non_empty_only=True)
+        mock_db.list_daily_reports.assert_called_once_with(
+            report_date=date(2026, 4, 3),
+            scope_key="global",
+            non_empty_only=True,
+        )
+
+    def test_export_catalog_uses_non_empty_filter_for_hourly_reports(self):
+        from src.web.blueprints.export import _catalog_payload
+
+        mock_db = Mock()
+        mock_db.get_hourly_report_dates.return_value = [date(2026, 4, 3)]
+        mock_db.list_hourly_reports.return_value = []
+
+        with patch("src.web.blueprints.export.get_db", return_value=mock_db):
+            with patch("src.web.blueprints.export._configured_export_scopes", return_value=[]):
+                payload = _catalog_payload("hourly", "global", None)
+
+        self.assertEqual(payload["report_type"], "hourly")
+        mock_db.get_hourly_report_dates.assert_called_once_with(scope_key="global", non_empty_only=True)
+        mock_db.list_hourly_reports.assert_called_once_with(
+            report_date=date(2026, 4, 3),
+            scope_key="global",
+            non_empty_only=True,
+        )
 
     def test_daily_report_payload_is_enriched_with_content_html(self):
         from src.web.markdown import enrich_daily_report_payload

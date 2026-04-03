@@ -367,6 +367,58 @@ class Database:
             )
             return list(db.scalars(stmt))
 
+    def list_daily_reports(
+        self,
+        *,
+        report_date: Optional[date] = None,
+        scope_key: Optional[str] = None,
+        non_empty_only: bool = False,
+    ) -> List[DailyReport]:
+        with self.session() as db:
+            stmt = select(DailyReport)
+            if report_date is not None:
+                stmt = stmt.where(DailyReport.report_date == report_date)
+            if scope_key:
+                stmt = stmt.where(DailyReport.scope_key == scope_key)
+            if non_empty_only:
+                stmt = stmt.where(DailyReport.source_message_count > 0)
+                stmt = stmt.where(DailyReport.candidate_message_count > 0)
+            stmt = stmt.order_by(
+                desc(DailyReport.report_date),
+                DailyReport.scope_type.asc(),
+                DailyReport.region_key.asc(),
+                DailyReport.channel_name.asc(),
+                DailyReport.window_start.asc(),
+            )
+            return list(db.scalars(stmt))
+
+    def get_daily_report_dates(
+        self,
+        *,
+        scope_key: Optional[str] = None,
+        non_empty_only: bool = False,
+        limit: int = 60,
+    ) -> List[date]:
+        with self.session() as db:
+            stmt = select(DailyReport.report_date).distinct()
+            if scope_key:
+                stmt = stmt.where(DailyReport.scope_key == scope_key)
+            if non_empty_only:
+                stmt = stmt.where(DailyReport.source_message_count > 0)
+                stmt = stmt.where(DailyReport.candidate_message_count > 0)
+            stmt = stmt.order_by(desc(DailyReport.report_date)).limit(limit)
+            return [item for item in db.scalars(stmt) if item is not None]
+
+    def get_daily_reports_by_ids(self, ids: Iterable[int]) -> List[DailyReport]:
+        normalized_ids = [int(item) for item in ids]
+        if not normalized_ids:
+            return []
+        with self.session() as db:
+            stmt = select(DailyReport).where(DailyReport.id.in_(normalized_ids))
+            items = list(db.scalars(stmt))
+        position = {report_id: index for index, report_id in enumerate(normalized_ids)}
+        return sorted(items, key=lambda item: position.get(int(item.id), len(position)))
+
     def count_daily_reports(self, scope_key: str = "global") -> int:
         with self.session() as db:
             stmt = select(func.count()).select_from(DailyReport).where(DailyReport.scope_key == scope_key)
@@ -423,6 +475,58 @@ class Database:
                 .order_by(HourlyReport.window_start.asc())
             )
             return list(db.scalars(stmt))
+
+    def list_hourly_reports(
+        self,
+        *,
+        report_date: Optional[date] = None,
+        scope_key: Optional[str] = None,
+        non_empty_only: bool = False,
+    ) -> List[HourlyReport]:
+        with self.session() as db:
+            stmt = select(HourlyReport)
+            if report_date is not None:
+                stmt = stmt.where(HourlyReport.report_date == report_date)
+            if scope_key:
+                stmt = stmt.where(HourlyReport.scope_key == scope_key)
+            if non_empty_only:
+                stmt = stmt.where(HourlyReport.source_message_count > 0)
+                stmt = stmt.where(HourlyReport.candidate_message_count > 0)
+            stmt = stmt.order_by(
+                desc(HourlyReport.report_date),
+                HourlyReport.window_start.asc(),
+                HourlyReport.scope_type.asc(),
+                HourlyReport.region_key.asc(),
+                HourlyReport.channel_name.asc(),
+            )
+            return list(db.scalars(stmt))
+
+    def get_hourly_report_dates(
+        self,
+        *,
+        scope_key: Optional[str] = None,
+        non_empty_only: bool = False,
+        limit: int = 60,
+    ) -> List[date]:
+        with self.session() as db:
+            stmt = select(HourlyReport.report_date).distinct()
+            if scope_key:
+                stmt = stmt.where(HourlyReport.scope_key == scope_key)
+            if non_empty_only:
+                stmt = stmt.where(HourlyReport.source_message_count > 0)
+                stmt = stmt.where(HourlyReport.candidate_message_count > 0)
+            stmt = stmt.order_by(desc(HourlyReport.report_date)).limit(limit)
+            return [item for item in db.scalars(stmt) if item is not None]
+
+    def get_hourly_reports_by_ids(self, ids: Iterable[int]) -> List[HourlyReport]:
+        normalized_ids = [int(item) for item in ids]
+        if not normalized_ids:
+            return []
+        with self.session() as db:
+            stmt = select(HourlyReport).where(HourlyReport.id.in_(normalized_ids))
+            items = list(db.scalars(stmt))
+        position = {report_id: index for index, report_id in enumerate(normalized_ids)}
+        return sorted(items, key=lambda item: position.get(int(item.id), len(position)))
 
     def count_hourly_reports(self, report_date: Optional[date] = None, scope_key: str = "global") -> int:
         with self.session() as db:
