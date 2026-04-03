@@ -1,0 +1,32 @@
+services:
+  web:
+    container_name: discord-words-cloud-web-local
+    image: discord-words-cloud:web-local
+    build:
+      context: .
+      target: web
+    env_file:
+      - .docker.env
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  bot:
+    container_name: discord-words-cloud-bot-local
+    image: discord-words-cloud:bot-local
+    build:
+      context: .
+      target: bot
+    env_file:
+      - .docker.env
+    restart: unless-stopped
+
+  worker:
+    container_name: discord-words-cloud-worker-local
+    image: discord-words-cloud:worker-local
+    build:
+      context: .
+      target: worker
+    env_file:
+      - .docker.env
+    restart: unless-stopped

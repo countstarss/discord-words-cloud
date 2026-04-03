@@ -17,6 +17,7 @@ ENV/
 
 # Environment
 .env
+.docker.env
 .env.local
 
 # Logs
