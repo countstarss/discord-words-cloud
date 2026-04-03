@@ -109,7 +109,13 @@ python3 -m src.main flask-web
 python3 -m src.web.flask_app
 ```
 
-The first Flask version serves the same dashboard UI and API payloads as the current FastAPI page, while giving us a separate web layer for future UI expansion.
+The Flask web layer now provides a template-based UI shell with reusable components and multiple pages, while still reading from the same API logic:
+
+- `/` or `/dashboard`: overview dashboard
+- `/reports`: daily report browser
+- `/api/*` and `/daily-report`: unchanged JSON data endpoints reused by the Flask UI
+
+For report rendering, the Flask UI enriches daily-report payloads with server-rendered `content_html` generated from Markdown using `mistune`, while the browser keeps a lightweight fallback renderer for older payloads.
 
 **Start Discord bot:**
 ```bash

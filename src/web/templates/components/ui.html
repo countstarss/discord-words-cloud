@@ -1,0 +1,38 @@
+{% macro stat_card(id, label, value='--', caption=None) -%}
+  <div class="stat-card">
+    <span>{{ label }}</span>
+    <strong{% if id %} id="{{ id }}"{% endif %}>{{ value }}</strong>
+    {% if caption %}
+      <small>{{ caption }}</small>
+    {% endif %}
+  </div>
+{%- endmacro %}
+
+{% macro mini_stat(id, label, value='--') -%}
+  <div class="mini-card">
+    <label>{{ label }}</label>
+    <strong{% if id %} id="{{ id }}"{% endif %}>{{ value }}</strong>
+  </div>
+{%- endmacro %}
+
+{% macro panel_heading(title, description, badge=None, badge_class='live-pill') -%}
+  <div class="panel-head">
+    <div>
+      <h2>{{ title }}</h2>
+      <p>{{ description }}</p>
+    </div>
+    {% if badge %}
+      <div class="{{ badge_class }}">{{ badge }}</div>
+    {% endif %}
+  </div>
+{%- endmacro %}
+
+{% macro empty_state(message, detail=None, element_id=None, class_name='empty') -%}
+  <div class="{{ class_name }}"{% if element_id %} id="{{ element_id }}"{% endif %}>
+    <div>{{ message }}</div>
+    {% if detail %}
+      <small>{{ detail }}</small>
+    {% endif %}
+  </div>
+{%- endmacro %}
+

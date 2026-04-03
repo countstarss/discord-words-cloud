@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ page_title }} | {{ app_name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
+    {% block head %}{% endblock %}
+  </head>
+  <body data-page="{{ active_nav }}">
+    <div class="app-shell">
+      <aside class="sidebar">
+        {% include "components/sidebar.html" %}
+      </aside>
+
+      <main class="workspace">
+        <section class="workspace-body">
+          {% block content %}{% endblock %}
+        </section>
+      </main>
+    </div>
+
+    <script defer src="{{ url_for('static', filename='js/common.js') }}"></script>
+    {% block page_scripts %}{% endblock %}
+  </body>
+</html>

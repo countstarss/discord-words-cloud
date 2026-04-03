@@ -1,41 +1,61 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
 class FlaskWebTests(unittest.TestCase):
-    def test_dashboard_html_contains_configured_channel_summary_hook(self):
-        from src.api.app import _dashboard_html
-
-        html = _dashboard_html()
-        self.assertIn('id="configuredChannelCount"', html)
-        self.assertIn('id="targetTree"', html)
-
     def _create_app(self):
         try:
             from src.web.flask_app import create_app
         except ModuleNotFoundError as exc:
-            if exc.name == "flask":
+            if exc.name in {"flask", "mistune"}:
                 self.skipTest("Flask is not installed in the current environment.")
             raise
         return create_app()
 
-    def test_dashboard_matches_fastapi_markup(self):
-        from src.api.app import _dashboard_html
+    def test_template_structure_exists(self):
+        template_root = Path(__file__).resolve().parent.parent / "src" / "web" / "templates"
+        static_root = Path(__file__).resolve().parent.parent / "src" / "web" / "static"
 
+        self.assertTrue((template_root / "base.html").exists())
+        self.assertTrue((template_root / "dashboard" / "index.html").exists())
+        self.assertTrue((template_root / "reports" / "index.html").exists())
+        self.assertTrue((template_root / "components" / "sidebar.html").exists())
+        self.assertTrue((static_root / "css" / "app.css").exists())
+        self.assertTrue((static_root / "js" / "common.js").exists())
+
+    def test_dashboard_route_renders_sidebar_layout(self):
         app = self._create_app()
         with app.test_client() as client:
             response = client.get("/")
 
+        html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_data(as_text=True), _dashboard_html())
+        self.assertIn("sidebar", html)
+        self.assertIn('id="reportDate"', html)
+        self.assertIn("Dashboard", html)
+        self.assertNotIn("FLASK WORKSPACE", html)
+
+    def test_reports_route_renders_report_browser_layout(self):
+        app = self._create_app()
+        with app.test_client() as client:
+            response = client.get("/reports")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="scopeSelect"', html)
+        self.assertIn('id="reportList"', html)
+        self.assertIn('id="reportBody"', html)
+        self.assertIn("Reports", html)
+        self.assertNotIn("Configured Coverage", html)
 
     def test_messages_endpoint_delegates_to_existing_logic(self):
         app = self._create_app()
         expected = {"messages": [], "limit": 5, "offset": 10}
 
-        with patch("src.web.flask_app.api_get_messages", return_value=expected) as mock_get_messages:
+        with patch("src.web.blueprints.api.api_get_messages", return_value=expected) as mock_get_messages:
             with app.test_client() as client:
                 response = client.get("/api/messages?limit=5&offset=10&scope_key=demo")
 
@@ -45,12 +65,25 @@ class FlaskWebTests(unittest.TestCase):
 
     def test_daily_report_endpoint_delegates_to_existing_logic(self):
         app = self._create_app()
-        expected = {"reports": [{"report_date": "2026-03-26"}]}
+        expected = {"reports": [{"report_date": "2026-03-26", "content_cn": "# Title"}]}
 
-        with patch("src.web.flask_app.api_get_daily_reports", return_value=expected) as mock_get_reports:
-            with app.test_client() as client:
-                response = client.get("/daily-report?scope_key=global")
+        with patch("src.web.blueprints.api.api_get_daily_reports", return_value=expected) as mock_get_reports:
+            with patch("src.web.blueprints.api.enrich_daily_report_payload", return_value={"reports": [{"report_date": "2026-03-26", "content_html": "<h1>Title</h1>"}]}) as mock_enrich:
+                with app.test_client() as client:
+                    response = client.get("/daily-report?scope_key=global")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), expected)
+        self.assertEqual(response.get_json(), {"reports": [{"report_date": "2026-03-26", "content_html": "<h1>Title</h1>"}]})
         mock_get_reports.assert_called_once_with(scope_key="global")
+        mock_enrich.assert_called_once_with(expected)
+
+    def test_daily_report_payload_is_enriched_with_content_html(self):
+        from src.web.markdown import enrich_daily_report_payload
+
+        payload = {"reports": [{"report_date": "2026-03-26", "content_cn": "# Title"}]}
+
+        with patch("src.web.markdown.render_markdown_html", return_value="<h1>Title</h1>\n") as mock_render:
+            enriched = enrich_daily_report_payload(payload)
+
+        self.assertEqual(enriched["reports"][0]["content_html"], "<h1>Title</h1>\n")
+        mock_render.assert_called_once_with("# Title")

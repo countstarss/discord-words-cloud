@@ -1,0 +1,19 @@
+<header class="topbar panel">
+  <div class="topbar-copy">
+    <span class="topbar-kicker">{{ page_kicker }}</span>
+    <div>
+      <h1>{{ page_title }}</h1>
+      {% if page_description %}
+        <p>{{ page_description }}</p>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if page_badges %}
+    <div class="badge-row">
+      {% for badge in page_badges %}
+        <span class="status-chip">{{ badge }}</span>
+      {% endfor %}
+    </div>
+  {% endif %}
+</header>

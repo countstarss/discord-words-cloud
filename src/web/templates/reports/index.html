@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "components/ui.html" import empty_state, mini_stat, panel_heading, stat_card %}
+
+{% block content %}
+<section class="section-grid">
+  {{ stat_card("reportsTotalReports", "Stored Daily Reports") }}
+  {{ stat_card("reportsLatestDate", "Latest Report Date") }}
+  {{ stat_card("reportsHourlyToday", "Today Hourly Reports") }}
+  {{ stat_card("reportsScopeCount", "Available Scopes") }}
+</section>
+
+<section class="content-grid content-grid--reports">
+  <article class="panel panel-section">
+    {{ panel_heading("Report Browser", "") }}
+
+    <div class="field-group">
+      <label class="field-label" for="scopeSelect">Scope</label>
+      <select id="scopeSelect" class="select-control"></select>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label" for="reportDate">Report Date</label>
+      <select id="reportDate" class="select-control"></select>
+    </div>
+
+    <div class="report-list" id="reportList">
+      {{ empty_state("Loading daily report list...") }}
+    </div>
+  </article>
+
+  <article class="panel panel-section panel-section--fill">
+    <div class="report-shell">
+      <div class="report-header">
+        <div>
+          <span class="report-eyebrow" id="reportScopeLabel">All channels</span>
+          <strong id="reportTitle">No report selected</strong>
+          <span id="reportWindow">--</span>
+        </div>
+        <div class="report-header-meta">
+          <span>Messages / Candidates</span>
+          <strong id="reportCounts">--</strong>
+        </div>
+      </div>
+      <div class="mini-grid mini-grid-inline">
+        {{ mini_stat("reportMessages", "Current Report Messages") }}
+        {{ mini_stat("reportCandidateMessages", "Current Report Candidates") }}
+      </div>
+      <article class="report-body" id="reportBody">
+        {{ empty_state("Choose a scope and report date to inspect the markdown output.") }}
+      </article>
+    </div>
+  </article>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/reports.js') }}"></script>
+{% endblock %}

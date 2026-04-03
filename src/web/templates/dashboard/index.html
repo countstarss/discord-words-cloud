@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% from "components/ui.html" import empty_state, mini_stat, panel_heading, stat_card %}
+
+{% block content %}
+<section class="hero-grid">
+  <article class="panel hero-panel">
+    <span class="hero-kicker">Rubii Intelligence Monitor</span>
+    <h2>Tech Minimal Dashboard</h2>
+    <p>
+      Observe collection volume, daily report production, and switch across generated daily reports inside a reusable
+      Flask layout.
+    </p>
+  </article>
+
+  <section class="stats-grid">
+    {{ stat_card("totalMessages", "Collected Messages") }}
+    {{ stat_card("totalReports", "Daily Reports") }}
+    {{ stat_card("activeUsers", "24h Active Users") }}
+    {{ stat_card("latestReport", "Latest Report") }}
+  </section>
+</section>
+
+<section class="content-grid content-grid--dashboard">
+  <article class="panel panel-section">
+    {{ panel_heading("Snapshot", "Operational counters and report context.", "Live") }}
+
+    <div class="field-group">
+      <label class="field-label" for="reportDate">Switch Daily Report</label>
+      <select id="reportDate" class="select-control"></select>
+    </div>
+
+    <div class="mini-grid">
+      {{ mini_stat("latestMessageAt", "Latest Message") }}
+      {{ mini_stat("hourlyReportsToday", "Today Hourly Reports") }}
+      {{ mini_stat("reportMessages", "Current Report Messages") }}
+      {{ mini_stat("reportCandidateMessages", "Current Report Candidates") }}
+    </div>
+
+    <div class="tree-panel" id="targetTree">
+      {{ empty_state("Loading region and channel map...") }}
+    </div>
+  </article>
+
+  <article class="panel panel-section panel-section--fill">
+    <div class="report-shell">
+      <div class="report-header">
+        <div>
+          <strong id="reportTitle">No report selected</strong>
+          <span id="reportWindow">--</span>
+        </div>
+        <div class="report-header-meta">
+          <span>Messages / Candidates</span>
+          <strong id="reportCounts">--</strong>
+        </div>
+      </div>
+      <article class="report-body" id="reportBody">
+        {{ empty_state("Loading dashboard data...") }}
+      </article>
+    </div>
+  </article>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

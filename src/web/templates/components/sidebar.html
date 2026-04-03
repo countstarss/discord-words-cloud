@@ -1,0 +1,22 @@
+<div class="sidebar-brand">
+  <div class="brand-mark">RB</div>
+  <div class="brand-copy">
+    <span class="brand-eyebrow">Server-rendered UI</span>
+    <strong>{{ app_name }}</strong>
+  </div>
+</div>
+
+<div class="sidebar-group">
+  <span class="sidebar-label">Navigate</span>
+  <nav class="sidebar-nav">
+    {% for item in primary_nav_items %}
+    <a class="nav-item{% if active_nav == item.key %} is-active{% endif %}" href="{{ url_for(item.endpoint) }}">
+      <span class="nav-short">{{ item.short }}</span>
+      <span class="nav-copy">
+        <strong>{{ item.label }}</strong>
+        <small>{{ item.description }}</small>
+      </span>
+    </a>
+    {% endfor %}
+  </nav>
+</div>
