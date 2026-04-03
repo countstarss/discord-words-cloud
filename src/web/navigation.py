@@ -17,5 +17,11 @@ PRIMARY_NAV_ITEMS = [
         "description": "Browse generated daily reports",
         "short": "RP",
     },
+    {
+        "key": "messages",
+        "endpoint": "messages.index",
+        "label": "Messages",
+        "description": "Browse collected messages by channel and date",
+        "short": "MS",
+    },
 ]
-

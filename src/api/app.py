@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI, Query
@@ -40,6 +41,28 @@ def _configured_regions() -> list[dict]:
             }
         )
     return regions
+
+
+def _message_browser_scopes() -> list[dict]:
+    return [
+        {
+            "scope_key": channel["scope_key"],
+            "label": f"{region['name']} / {channel['name']}",
+            "region_key": region["key"],
+            "region_name": region["name"],
+            "channel_id": channel["id"],
+            "channel_name": channel["name"],
+        }
+        for region in _configured_regions()
+        for channel in region.get("channels", [])
+    ]
+
+
+def _local_date_window(report_date: date, timezone_name: str = "Asia/Shanghai") -> tuple[datetime, datetime]:
+    local_tz = ZoneInfo(timezone_name)
+    local_start = datetime.combine(report_date, time.min, tzinfo=local_tz)
+    local_end = local_start + timedelta(days=1)
+    return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
 
 def _dashboard_html() -> str:
@@ -950,6 +973,81 @@ def get_messages(
         ],
         "limit": limit,
         "offset": offset,
+    }
+
+
+@app.get("/api/messages/browser")
+def get_messages_browser(
+    scope_key: Optional[str] = Query(default=None),
+    report_date: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    db = get_db()
+    scopes = _message_browser_scopes()
+    selected_scope = scope_key or (scopes[0]["scope_key"] if scopes else None)
+    if not selected_scope:
+        return {
+            "available_scopes": [],
+            "available_dates": [],
+            "selected_scope": None,
+            "selected_date": None,
+            "messages": [],
+            "pagination": {"page": 1, "page_size": page_size, "total_items": 0, "total_pages": 0},
+        }
+
+    available_dates = [item.isoformat() for item in db.get_message_dates_for_scope(scope_key=selected_scope)]
+    if report_date:
+        try:
+            selected_date = date.fromisoformat(report_date)
+        except ValueError:
+            selected_date = date.fromisoformat(available_dates[0]) if available_dates else date.today()
+    else:
+        selected_date = date.fromisoformat(available_dates[0]) if available_dates else date.today()
+
+    window_start, window_end = _local_date_window(selected_date)
+    total_items = db.count_messages_for_window(window_start, window_end, scope_key=selected_scope)
+    total_pages = max(1, (total_items + page_size - 1) // page_size) if total_items else 0
+    current_page = min(page, total_pages or 1)
+    offset = (current_page - 1) * page_size
+    messages = db.get_messages_page_for_window(
+        window_start,
+        window_end,
+        scope_key=selected_scope,
+        limit=page_size,
+        offset=offset,
+    )
+
+    return {
+        "available_scopes": scopes,
+        "available_dates": available_dates,
+        "selected_scope": selected_scope,
+        "selected_date": selected_date.isoformat(),
+        "messages": [
+            {
+                "message_id": m.message_id,
+                "guild_id": m.guild_id,
+                "channel_id": m.channel_id,
+                "author_id": m.author_id,
+                "region_key": m.region_key,
+                "region_name": m.region_name,
+                "channel_name": m.channel_name,
+                "channel_group": m.channel_group,
+                "scope_key": m.scope_key,
+                "content": m.content,
+                "detected_language": m.detected_language,
+                "detected_language_confidence": m.detected_language_confidence,
+                "quality_score": m.quality_score,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in messages
+        ],
+        "pagination": {
+            "page": current_page,
+            "page_size": page_size,
+            "total_items": total_items,
+            "total_pages": total_pages,
+        },
     }
 
 

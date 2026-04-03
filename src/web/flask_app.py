@@ -7,7 +7,7 @@ from flask import Flask
 
 from ..common import load_config
 from ..storage import init_db
-from .blueprints import api_bp, dashboard_bp, reports_bp
+from .blueprints import api_bp, dashboard_bp, messages_bp, reports_bp
 from .navigation import APP_NAME, PRIMARY_NAV_ITEMS
 
 
@@ -16,6 +16,7 @@ def create_app() -> Flask:
 
     app.register_blueprint(api_bp)
     app.register_blueprint(dashboard_bp)
+    app.register_blueprint(messages_bp)
     app.register_blueprint(reports_bp)
 
     @app.context_processor

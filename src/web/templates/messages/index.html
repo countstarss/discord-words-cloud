@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% from "components/ui.html" import empty_state, panel_heading %}
+
+{% block content %}
+<section class="content-grid content-grid--messages">
+  <article class="panel panel-section">
+    {{ panel_heading("Messages", "Browse collected messages with fixed scope, date, and page filters.") }}
+
+    <div class="field-group">
+      <label class="field-label" for="scopeSelect">Scope</label>
+      <select id="scopeSelect" class="select-control"></select>
+    </div>
+
+    <div class="field-group">
+      <label class="field-label" for="reportDate">Date</label>
+      <select id="reportDate" class="select-control"></select>
+    </div>
+  </article>
+
+  <article class="panel panel-section panel-section--fill">
+    <div class="message-shell">
+      <div class="message-header">
+        <div>
+          <strong id="messageTitle">Messages</strong>
+          <span id="messageMeta">Choose a scope and date to inspect collected messages.</span>
+        </div>
+        <div class="message-pager">
+          <button type="button" class="pager-button" id="prevPage">Prev</button>
+          <span id="pageIndicator">--</span>
+          <button type="button" class="pager-button" id="nextPage">Next</button>
+        </div>
+      </div>
+
+      <div class="message-list" id="messageList">
+        {{ empty_state("Loading messages...") }}
+      </div>
+    </div>
+  </article>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/messages.js') }}"></script>
+{% endblock %}

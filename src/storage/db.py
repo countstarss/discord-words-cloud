@@ -256,6 +256,65 @@ class Database:
                 stmt = stmt.where(Message.scope_key == scope_key)
             return list(db.scalars(stmt))
 
+    def get_messages_page_for_window(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        scope_key: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Message]:
+        with self.session() as db:
+            stmt = (
+                select(Message)
+                .where(Message.is_deleted.is_(False))
+                .where(Message.scope_key == scope_key)
+                .where(Message.created_at >= window_start)
+                .where(Message.created_at < window_end)
+                .order_by(desc(Message.created_at), desc(Message.message_id))
+                .limit(limit)
+                .offset(offset)
+            )
+            return list(db.scalars(stmt))
+
+    def count_messages_for_window(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        scope_key: str,
+    ) -> int:
+        with self.session() as db:
+            stmt = (
+                select(func.count())
+                .select_from(Message)
+                .where(Message.is_deleted.is_(False))
+                .where(Message.scope_key == scope_key)
+                .where(Message.created_at >= window_start)
+                .where(Message.created_at < window_end)
+            )
+            return int(db.scalar(stmt) or 0)
+
+    def get_message_dates_for_scope(
+        self,
+        *,
+        scope_key: str,
+        timezone_name: str = "Asia/Shanghai",
+        limit: int = 31,
+    ) -> List[date]:
+        with self.session() as db:
+            local_date = func.date(func.timezone(timezone_name, Message.created_at))
+            stmt = (
+                select(local_date.label("local_date"))
+                .where(Message.is_deleted.is_(False))
+                .where(Message.scope_key == scope_key)
+                .group_by(local_date)
+                .order_by(desc(local_date))
+                .limit(limit)
+            )
+            return [item for item in db.scalars(stmt) if item is not None]
+
     def count_messages(
         self,
         scope_key: Optional[str] = None,

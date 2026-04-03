@@ -21,6 +21,7 @@ class FlaskWebTests(unittest.TestCase):
 
         self.assertTrue((template_root / "base.html").exists())
         self.assertTrue((template_root / "dashboard" / "index.html").exists())
+        self.assertTrue((template_root / "messages" / "index.html").exists())
         self.assertTrue((template_root / "reports" / "index.html").exists())
         self.assertTrue((template_root / "components" / "sidebar.html").exists())
         self.assertTrue((static_root / "css" / "app.css").exists())
@@ -51,6 +52,18 @@ class FlaskWebTests(unittest.TestCase):
         self.assertIn("Reports", html)
         self.assertNotIn("Configured Coverage", html)
 
+    def test_messages_route_renders_message_browser_layout(self):
+        app = self._create_app()
+        with app.test_client() as client:
+            response = client.get("/messages")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="scopeSelect"', html)
+        self.assertIn('id="reportDate"', html)
+        self.assertIn('id="messageList"', html)
+        self.assertIn("Messages", html)
+
     def test_messages_endpoint_delegates_to_existing_logic(self):
         app = self._create_app()
         expected = {"messages": [], "limit": 5, "offset": 10}
@@ -62,6 +75,38 @@ class FlaskWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), expected)
         mock_get_messages.assert_called_once_with(limit=5, offset=10, scope_key="demo")
+
+    def test_message_browser_endpoint_delegates_to_existing_logic(self):
+        app = self._create_app()
+        expected = {"messages": [], "available_scopes": [], "available_dates": [], "pagination": {"page": 2}}
+
+        with patch("src.web.blueprints.api.api_get_messages_browser", return_value=expected) as mock_get_messages:
+            with app.test_client() as client:
+                response = client.get("/api/messages/browser?scope_key=demo&report_date=2026-04-03&page=2&page_size=20")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), expected)
+        mock_get_messages.assert_called_once_with(
+            scope_key="demo",
+            report_date="2026-04-03",
+            page=2,
+            page_size=20,
+        )
+
+    def test_message_browser_endpoint_clamps_page_bounds(self):
+        app = self._create_app()
+
+        with patch("src.web.blueprints.api.api_get_messages_browser", return_value={"messages": []}) as mock_get_messages:
+            with app.test_client() as client:
+                response = client.get("/api/messages/browser?page=-3&page_size=999")
+
+        self.assertEqual(response.status_code, 200)
+        mock_get_messages.assert_called_once_with(
+            scope_key=None,
+            report_date=None,
+            page=1,
+            page_size=100,
+        )
 
     def test_daily_report_endpoint_delegates_to_existing_logic(self):
         app = self._create_app()
