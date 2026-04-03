@@ -5,26 +5,9 @@ import argparse
 import os
 from typing import Optional
 
-from ..common import load_config
+from ..common import database_url_from_config, load_config
 from ..storage import init_db
 from .client import DiscordCollector
-
-
-# MARK: - Config
-def _database_url_from_config(config: dict) -> Optional[str]:
-    db_cfg = config.get("database", {})
-    if db_cfg.get("url"):
-        return db_cfg["url"]
-
-    host = db_cfg.get("host")
-    port = db_cfg.get("port")
-    name = db_cfg.get("name")
-    user = db_cfg.get("user")
-    password = db_cfg.get("password")
-    if not all([host, port, name, user]):
-        return None
-    password = password or ""
-    return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
 
 
 # MARK: - Runner
@@ -34,7 +17,7 @@ def run_bot(config_path: Optional[str] = None) -> None:
     if not token:
         raise RuntimeError("Missing Discord token. Set discord.token or DISCORD_BOT_TOKEN")
 
-    database_url = _database_url_from_config(config)
+    database_url = database_url_from_config(config)
     db = init_db(database_url=database_url)
 
     client = DiscordCollector(config=config, db=db)

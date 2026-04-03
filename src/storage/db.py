@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, delete, desc, func, inspect, select, text,
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from ..common import normalize_database_url
 from .models import (
     Base,
     DailyReport,
@@ -19,7 +20,7 @@ from .models import (
 
 # MARK: - Config
 def _database_url_from_env() -> str:
-    raw_url = os.getenv("DATABASE_URL")
+    raw_url = normalize_database_url(os.getenv("DATABASE_URL"))
     if raw_url:
         return raw_url
 

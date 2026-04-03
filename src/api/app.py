@@ -10,7 +10,7 @@ import uvicorn
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
-from ..common import load_config
+from ..common import database_url_from_config, load_config
 from ..storage import get_db, init_db
 
 app = FastAPI(title="Rubii Words Cloud", version="0.1.0")
@@ -1154,21 +1154,9 @@ def get_daily_reports(scope_key: str = Query(default="global")) -> dict:
 # MARK: - Web Runtime
 def run_web(config_path: Optional[str] = None) -> None:
     config = load_config(config_path)
-    
+
     # Initialize database
-    db_cfg = config.get("database", {})
-    database_url = None
-    if db_cfg.get("url"):
-        database_url = db_cfg["url"]
-    else:
-        host = db_cfg.get("host", "localhost")
-        port = db_cfg.get("port", "5432")
-        name = db_cfg.get("name", "rubii_words")
-        user = db_cfg.get("user", "postgres")
-        password = db_cfg.get("password", "")
-        database_url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
-    
-    init_db(database_url=database_url)
+    init_db(database_url=database_url_from_config(config))
 
     web_cfg = config.get("web", {})
     host_addr = web_cfg.get("host", "0.0.0.0")

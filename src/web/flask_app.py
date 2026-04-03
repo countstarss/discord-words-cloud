@@ -5,7 +5,7 @@ from typing import Optional
 
 from flask import Flask
 
-from ..common import load_config
+from ..common import database_url_from_config, load_config
 from ..storage import init_db
 from .blueprints import api_bp, dashboard_bp, export_bp, messages_bp, reports_bp
 from .navigation import APP_NAME, PRIMARY_NAV_ITEMS
@@ -35,20 +35,7 @@ app = create_app()
 
 def run_web(config_path: Optional[str] = None) -> None:
     config = load_config(config_path)
-
-    db_cfg = config.get("database", {})
-    database_url = None
-    if db_cfg.get("url"):
-        database_url = db_cfg["url"]
-    else:
-        host = db_cfg.get("host", "localhost")
-        port = db_cfg.get("port", "5432")
-        name = db_cfg.get("name", "rubii_words_cloud")
-        user = db_cfg.get("user", "postgres")
-        password = db_cfg.get("password", "")
-        database_url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
-
-    init_db(database_url=database_url)
+    init_db(database_url=database_url_from_config(config))
 
     web_cfg = config.get("web", {})
     host_addr = web_cfg.get("host", "0.0.0.0")

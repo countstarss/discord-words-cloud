@@ -6,7 +6,7 @@ from typing import Optional
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from ..common import load_config
+from ..common import database_url_from_config, load_config
 from ..storage import init_db
 from .service import (
     DailyReportService,
@@ -15,27 +15,9 @@ from .service import (
     SHANGHAI_TZ,
     build_report_scopes,
 )
-
-
-def _database_url_from_config(config: dict) -> Optional[str]:
-    db_cfg = config.get("database", {})
-    if db_cfg.get("url"):
-        return db_cfg["url"]
-
-    host = db_cfg.get("host")
-    port = db_cfg.get("port")
-    name = db_cfg.get("name")
-    user = db_cfg.get("user")
-    password = db_cfg.get("password")
-    if not all([host, port, name, user]):
-        return None
-    password = password or ""
-    return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{name}"
-
-
 def _build_service(config_path: Optional[str] = None) -> DailyReportService:
     config = load_config(config_path)
-    db = init_db(database_url=_database_url_from_config(config))
+    db = init_db(database_url=database_url_from_config(config))
     reporting_cfg = config.get("reporting", {})
     budget_config = LLMBudgetConfig.from_config(reporting_cfg.get("llm"))
     translator = DailyReportTranslator.from_env(budget_config=budget_config)

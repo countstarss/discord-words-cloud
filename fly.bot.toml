@@ -1,0 +1,19 @@
+# Rename `app` if the generated Fly app name is already taken in your account.
+app = "rubii-words-bot"
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+  build-target = "bot"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+[[restart]]
+  policy = "always"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512
