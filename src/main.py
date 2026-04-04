@@ -3,8 +3,26 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .common import database_url_from_config, load_config
+
+
+def run_db_migrations(config_path: str | None = None) -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    config = load_config(config_path)
+    database_url = database_url_from_config(config)
+    alembic_ini_path = Path(__file__).resolve().parents[1] / "alembic.ini"
+
+    alembic_config = Config(str(alembic_ini_path))
+    if database_url:
+        alembic_config.set_main_option("sqlalchemy.url", database_url)
+
+    print("Applying database migrations...")
+    command.upgrade(alembic_config, "head")
+    print("Database migrations applied.")
 
 
 def main() -> None:
@@ -16,6 +34,7 @@ def main() -> None:
             "api",
             "flask-web",
             "init-db",
+            "migrate-db",
             "daily-report-worker",
             "daily-report-once",
             "daily-report-date",
@@ -50,6 +69,8 @@ def main() -> None:
         print(f"Initializing database: {name}")
         init_db(database_url=database_url)
         print("Database initialized successfully!")
+    elif args.command == "migrate-db":
+        run_db_migrations(config_path=args.config)
     elif args.command == "daily-report-worker":
         from .reports import run_daily_report_worker
 
