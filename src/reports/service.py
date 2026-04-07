@@ -268,6 +268,18 @@ def _merge_section_items(summaries: list[dict[str, Any]], section: str) -> list[
     return ordered[: SECTION_LIMITS[section]]
 
 
+def _strip_action_hints(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        return {
+            key: _strip_action_hints(value)
+            for key, value in payload.items()
+            if key != "action_hint"
+        }
+    if isinstance(payload, list):
+        return [_strip_action_hints(item) for item in payload]
+    return payload
+
+
 def _derive_sentiment(summary: dict[str, Any]) -> dict[str, str]:
     urgent_weight = sum(
         item.get("message_count", 0) * (3 if item.get("priority") == "high" else 2)
@@ -281,7 +293,7 @@ def _derive_sentiment(summary: dict[str, Any]) -> dict[str, str]:
         return {"score": "negative", "reason": "高优先级问题明显多于功能机会，用户情绪偏负面。"}
     if opportunity_weight > urgent_weight and urgent_weight <= 3:
         return {"score": "neutral", "reason": "以产品机会和使用反馈为主，负面问题不集中。"}
-    return {"score": "neutral", "reason": "问题与建议并存，整体情绪中性偏谨慎。"}
+    return {"score": "neutral", "reason": "问题与机会并存，整体情绪中性偏谨慎。"}
 
 
 def _empty_daily_markdown(report_date: date, window_start: datetime, window_end: datetime) -> str:
@@ -357,8 +369,6 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
                 lines.append("- 证据:")
                 for item in entry["evidence"]:
                     lines.append(f"  - {item}")
-            if entry["action_hint"]:
-                lines.append(f"- 建议动作: {entry['action_hint']}")
             lines.append("")
 
     _render_entries(summary.get("urgent_issues", []), " - 未发现集中的高优先级问题。")
@@ -600,8 +610,9 @@ class DailyReportTranslator:
         system = (
             "你是产品情报分析助手。"
             "你会阅读一批 Discord 消息候选信号，并输出严格 JSON。"
-            "尽量保留有价值的问题、机会、一般反馈和关键证据。"
+            "你只做客观信息归纳，尽量保留有价值的问题、机会、一般反馈和关键证据。"
             "忽略明显无关的寒暄，但不要过度丢弃潜在有用信息。"
+            "不要提出行动建议，不要给出解决方案，不要安排下一步。"
             "不要输出 markdown，不要输出解释，不要输出 JSON 之外的任何文本。"
         )
         user_content = (
@@ -614,11 +625,13 @@ class DailyReportTranslator:
             "}\n\n"
             "字段规则：\n"
             '- 每个条目都必须包含："key", "category", "priority", "title", "summary", '
-            '"message_count", "unique_user_count", "channel_ids", "evidence", "action_hint"\n'
+            '"message_count", "unique_user_count", "channel_ids", "evidence"\n'
             '- "key" 必须是稳定的 english_snake_case\n'
             '- "priority" 只能是 high / medium / low\n'
             '- "title" 和 "summary" 必须使用简体中文\n'
+            '- "summary" 只描述观察到的事实、问题、诉求和影响，不写建议或下一步动作\n'
             '- "evidence" 保留 1 到 4 条原始语言短摘录\n'
+            '- 不要输出 "action_hint"、建议动作、解决方案、排期建议或任何行动建议\n'
             '- 尽量合并语义接近的问题，保留更充分的证据和影响范围\n'
             '- urgent_issues 最多 10 项，product_opportunities 最多 8 项，general_feedback 最多 6 项\n'
             '- 如果产品信号很弱，返回空数组并给出 neutral sentiment\n\n'
@@ -637,10 +650,11 @@ class DailyReportTranslator:
         system = (
             "你是产品情报分析助手。"
             "阅读用户提供的 JSON 数据，只根据 JSON 本身写出中文报告。"
-            "直接生成自然、清晰、有重点的中文报告，不要套固定模板。"
+            "直接生成自然、清晰、有重点、客观克制的中文报告，不要套固定模板。"
+            "只做事实总结，不提出行动建议，不安排下一步，不写“建议/应当/可考虑/需要跟进”等行动导向表述。"
             "可以自行组织结构，但不要编造不存在的信息，不要输出 JSON。"
         )
-        user_content = f"把下面的 JSON 总结成中文报告交给我：\n{json.dumps(summary, ensure_ascii=False)}"
+        user_content = f"把下面的 JSON 客观总结成中文报告交给我：\n{json.dumps(summary, ensure_ascii=False)}"
         return self._request_text(system=system, user_content=user_content, max_tokens=6144).strip()
 
     def summarize_channel_text_shard(self, shard: dict[str, Any], scope: ReportScope, report_date: date) -> str:
@@ -648,6 +662,7 @@ class DailyReportTranslator:
             "你是产品情报分析助手。"
             "你会阅读单个 Discord 频道在一个时间片内的候选消息 JSON，并直接输出中文子报告。"
             "不要输出 JSON，不要解释提示词，只输出简洁、专业、可合并的中文报告。"
+            "报告只做客观归纳，不提出行动建议、解决方案或下一步安排。"
             "优先保留问题、用户诉求、明显趋势和代表性证据。"
         )
         user_content = (
@@ -655,6 +670,7 @@ class DailyReportTranslator:
             f"报告日期：{report_date.isoformat()}\n"
             f"时间窗口：{shard.get('window_start')} 至 {shard.get('window_end')}\n"
             "请直接生成一份中文子报告，长度尽量控制在 300 到 600 字之间。\n"
+            "只陈述观察到的事实、问题、趋势和用户反馈，不要写建议或待办。\n"
             "如果这一批里高价值信号不多，也请把真正有用的信息说清楚，不要为了凑字数编造内容。\n"
             "下面是候选消息 JSON：\n"
             f"{json.dumps(shard, ensure_ascii=False)}"
@@ -735,6 +751,7 @@ class DailyReportTranslator:
             "你是产品情报分析助手。"
             "你会把同一频道同一天的多段中文子报告合并成一份最终中文日报。"
             "要求去重、合并同类问题、保留重要证据和趋势，不要重复表述。"
+            "最终日报只做客观总结，不提出行动建议、解决方案或下一步安排。"
             "不要输出 JSON，不要说明你的处理过程，直接输出最终中文日报。"
         )
         user_content = (
@@ -745,7 +762,7 @@ class DailyReportTranslator:
             f"进入分析的候选消息数：{candidate_message_count}\n"
             f"活跃用户数：{active_user_count}\n"
             f"子报告数量：{len(cleaned_reports)}\n"
-            "请把下面这些中文子报告合并成一份自然、清晰、面向产品/运营可读的最终中文日报：\n\n"
+            "请把下面这些中文子报告合并成一份自然、清晰、面向产品/运营可读且只包含客观信息的最终中文日报：\n\n"
             + "\n\n".join(f"子报告 {index}：\n{text}" for index, text in enumerate(cleaned_reports, start=1))
         )
         return self._request_text(system=system, user_content=user_content, max_tokens=6144).strip()
@@ -1180,7 +1197,7 @@ class DailyReportService:
             "timezone": self.timezone_name,
             "window_start": _ensure_utc(expected_windows[0][1]).isoformat(),
             "window_end": _ensure_utc(expected_windows[-1][2]).isoformat(),
-            "hourly_reports": [report.content_json or {} for report in hourly_reports],
+            "hourly_reports": [_strip_action_hints(report.content_json or {}) for report in hourly_reports],
         }
         content_cn = (
             markdown
@@ -1262,7 +1279,7 @@ class DailyReportService:
             "timezone": self.timezone_name,
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
-            "hourly_reports": [summary],
+            "hourly_reports": [_strip_action_hints(summary)],
         }
         content_cn = (
             markdown
