@@ -31,10 +31,13 @@ def test_collector_import():
     assert SimpleLangDetector is not None
 
 
-def test_api_import():
-    """Test that API can be imported."""
-    from src.api.app import app
-    assert app is not None
+def test_web_api_payloads_import():
+    """Test that shared web API payload helpers can be imported."""
+    from src.web.api_payloads import get_dashboard, get_messages, health
+
+    assert get_dashboard is not None
+    assert get_messages is not None
+    assert health is not None
 
 
 def test_reports_import():

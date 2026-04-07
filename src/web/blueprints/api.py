@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from flask import Blueprint, request
 
-from ...api.app import (
+from ..api_payloads import (
     get_daily_reports as api_get_daily_reports,
     get_dashboard as api_get_dashboard,
     get_message as api_get_message,

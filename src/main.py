@@ -31,7 +31,6 @@ def main() -> None:
         "command",
         choices=[
             "bot",
-            "api",
             "flask-web",
             "init-db",
             "migrate-db",
@@ -51,9 +50,6 @@ def main() -> None:
     if args.command == "bot":
         from .collector.bot import run_bot
         run_bot(config_path=args.config)
-    elif args.command == "api":
-        from .api.app import run_web
-        run_web(config_path=args.config)
     elif args.command == "flask-web":
         from .web.flask_app import run_web as run_flask_web
 

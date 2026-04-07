@@ -1,12 +1,12 @@
 # Rubii Words Cloud
 
-A Discord message collector and API service that stores messages and exposes them via REST API.
+A Discord message collector and reporting dashboard that stores messages and exposes them via REST endpoints.
 
 ## Features
 
 - **Discord Collector**: Collects messages from Discord servers/channels in real-time
 - **Database Storage**: Stores messages in PostgreSQL with deduplication and quality scoring
-- **REST API**: Exposes message data via FastAPI
+- **REST API**: Exposes message data via the Flask web service
 
 ## Quick Start
 
@@ -93,23 +93,16 @@ alembic upgrade head
 
 ### 4. Run
 
-**Start API server:**
-```bash
-python3 -m src.main api
-# or
-python3 -m src.api.app
-```
-
-Open the dashboard at [http://127.0.0.1:8080/](http://127.0.0.1:8080/).
-
-**Start Flask web server:**
+**Start web server:**
 ```bash
 python3 -m src.main flask-web
 # or
 python3 -m src.web.flask_app
 ```
 
-The Flask web layer now provides a template-based UI shell with reusable components and multiple pages, while still reading from the same API logic:
+Open the dashboard at [http://127.0.0.1:8080/](http://127.0.0.1:8080/).
+
+The Flask web layer provides the template-based UI shell and the JSON endpoints used by the browser:
 
 - `/` or `/dashboard`: overview dashboard
 - `/reports`: daily report browser
@@ -131,6 +124,7 @@ python3 -m src.main daily-report-worker
 This worker now:
 - builds one `hourly_reports` record every 2 hours at `HH:05` Asia/Shanghai
 - merges the previous day's 12 interval reports into one daily report at `00:20` Asia/Shanghai
+- can optionally push the previous day's `global` daily report to a Feishu group bot at `09:00` Asia/Shanghai
 - uses `reporting.llm` config to control rolling 5-hour quota usage, shard sizing, and parallel shard requests
 
 **Generate today's report up to now:**
@@ -161,3 +155,11 @@ Target configuration notes:
 - Each region supports `key`, `name`, `guild_id` or `guild_ids`, and a `channels` list.
 - Each channel supports `id`, `name`, and optional `guild_id` or `guild_ids`.
 - `TARGET_GUILD_IDS` and `TARGET_CHANNEL_IDS` still work for compatibility, but `DISCORD_REGION_CHANNELS` should be treated as the primary configuration entry going forward.
+
+Feishu delivery notes:
+
+- Set `FEISHU_BOT_ENABLED=true` to enable scheduled push from the daily report worker.
+- `FEISHU_BOT_WEBHOOK_URL` should be the incoming webhook URL of your Feishu custom bot.
+- If your bot enables signature security, also set `FEISHU_BOT_SIGN_SECRET`.
+- If your bot enables keyword security, set `FEISHU_BOT_KEYWORD`; the worker will prefix every pushed message with that keyword.
+- The default scheduled push is `09:00` Asia/Shanghai for the previous day's `global` report. You can override it with `FEISHU_BOT_DAILY_SEND_HOUR`, `FEISHU_BOT_DAILY_SEND_MINUTE`, and `FEISHU_BOT_SCOPE_KEY`.
