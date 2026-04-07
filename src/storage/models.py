@@ -97,6 +97,35 @@ class DailyReport(Base):
     )
 
 
+# MARK: - Report Delivery Domain
+class ReportDelivery(Base):
+    __tablename__ = "report_deliveries"
+    __table_args__ = (
+        UniqueConstraint(
+            "delivery_channel",
+            "target_key",
+            "report_date",
+            "scope_key",
+            name="uq_report_deliveries_target",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    delivery_channel: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    target_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    scope_key: Mapped[str] = mapped_column(String(255), nullable=False, default="global", index=True)
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    detail: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    delivered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 # MARK: - Hourly Report Domain
 class HourlyReport(Base):
     __tablename__ = "hourly_reports"

@@ -127,6 +127,15 @@ This worker now:
 - can optionally push the previous day's `global` daily report to a Feishu group bot at `09:00` Asia/Shanghai
 - uses `reporting.llm` config to control rolling 5-hour quota usage, shard sizing, and parallel shard requests
 
+**Send the previous day's global report to Feishu immediately:**
+```bash
+python3 -m src.main daily-report-send-feishu
+```
+**如果需要绕过代理**
+```bash
+env -u HTTP_PROXY -u HTTPS_PROXY python3 -m src.main daily-report-send-feishu
+```
+
 **Generate today's report up to now:**
 ```bash
 python3 -m src.main daily-report-once --now
@@ -162,4 +171,4 @@ Feishu delivery notes:
 - `FEISHU_BOT_WEBHOOK_URL` should be the incoming webhook URL of your Feishu custom bot.
 - If your bot enables signature security, also set `FEISHU_BOT_SIGN_SECRET`.
 - If your bot enables keyword security, set `FEISHU_BOT_KEYWORD`; the worker will prefix every pushed message with that keyword.
-- The default scheduled push is `09:00` Asia/Shanghai for the previous day's `global` report. You can override it with `FEISHU_BOT_DAILY_SEND_HOUR`, `FEISHU_BOT_DAILY_SEND_MINUTE`, and `FEISHU_BOT_SCOPE_KEY`.
+- The Feishu push strategy is fixed in code: send the previous day's `global` report at `09:00` Asia/Shanghai, split long content with a `20000` char target, and use the title prefix `Discord Global 日报`.

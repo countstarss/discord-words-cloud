@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
+from typing import Optional
 from zoneinfo import ZoneInfo
 
+from src.reports.delivery import DailyReportFeishuNotifier, FeishuDeliveryConfig
 from src.pipeline import build_interval_pipeline_bundle_from_dataframe
 from src.reports.service import DailyReportService, ReportScope, SHANGHAI_TZ, render_daily_markdown
 from src.storage import Database
@@ -98,6 +101,15 @@ class FlakyTranslator(FakeTranslator):
         return super().summarize_signal_shard(shard)
 
 
+class CaptureDailyPayloadTranslator(FakeTranslator):
+    def __init__(self) -> None:
+        self.last_summary: Optional[dict] = None
+
+    def compose_daily_markdown(self, summary: dict) -> str:
+        self.last_summary = summary
+        return super().compose_daily_markdown(summary)
+
+
 def _make_db(tmp_path) -> Database:
     db_path = tmp_path / "daily_reports.sqlite3"
     db = Database(f"sqlite+pysqlite:///{db_path}")
@@ -141,6 +153,35 @@ def _message_payload(
         "updated_at": created_at,
         "deleted_at": None,
     }
+
+
+def _daily_report_payload(report_date: date, *, scope_key: str = "global", content_cn: str = "# 每日报告\n\n一切正常。") -> dict:
+    return {
+        "report_date": report_date,
+        "timezone": "Asia/Shanghai",
+        "scope_type": "global" if scope_key == "global" else "channel",
+        "scope_key": scope_key,
+        "region_key": "__all__" if scope_key == "global" else "default",
+        "channel_id": 0,
+        "channel_name": "",
+        "window_start": datetime.combine(report_date, datetime.min.time(), tzinfo=timezone.utc),
+        "window_end": datetime.combine(report_date, datetime.min.time(), tzinfo=timezone.utc),
+        "content": content_cn,
+        "content_cn": content_cn,
+        "source_message_count": 12,
+        "candidate_message_count": 4,
+        "generated_at": datetime.now(tz=timezone.utc),
+        "updated_at": datetime.now(tz=timezone.utc),
+    }
+
+
+class FakeFeishuClient:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def send_text(self, text: str) -> dict:
+        self.messages.append(text)
+        return {"code": 0, "msg": "ok"}
 
 
 def test_hourly_report_upsert_is_idempotent(tmp_path):
@@ -267,6 +308,72 @@ def test_daily_report_service_generates_hourly_and_daily_reports(tmp_path):
     assert db.count_hourly_reports(report_date) == 2
     assert "每日报告" in stored.content_cn
     assert "hourly_reports JSON" in stored.content_cn
+
+
+def test_render_daily_markdown_omits_action_hints(tmp_path):
+    del tmp_path
+    summary = {
+        "report_date": "2026-03-24",
+        "timezone": "Asia/Shanghai",
+        "window_start": "2026-03-23T16:00:00+00:00",
+        "window_end": "2026-03-24T16:00:00+00:00",
+        "source_message_count": 12,
+        "candidate_message_count": 4,
+        "active_user_count": 3,
+        "interval_count": 12,
+        "shard_count": 2,
+        "urgent_issues": [
+            {
+                "key": "login_failure",
+                "category": "bug_report",
+                "priority": "high",
+                "title": "登录失败",
+                "summary": "多名用户反馈更新后无法登录。",
+                "message_count": 4,
+                "unique_user_count": 3,
+                "channel_ids": ["10"],
+                "evidence": ["更新后一直卡在登录页"],
+                "action_hint": "尽快排查登录链路。",
+            }
+        ],
+        "product_opportunities": [],
+        "general_feedback": [],
+        "sentiment": {"score": "negative", "reason": "问题反馈集中。"},
+        "channel_ids": ["10"],
+        "detected_language_breakdown": {"th": 4},
+        "filter_details": {"filler": 1},
+    }
+
+    markdown = render_daily_markdown(summary)
+
+    assert "建议动作" not in markdown
+    assert "尽快排查登录链路" not in markdown
+
+
+def test_daily_report_llm_payload_omits_action_hints(tmp_path):
+    db = _make_db(tmp_path)
+    translator = CaptureDailyPayloadTranslator()
+    report_date = date(2026, 3, 24)
+
+    db.upsert_message(
+        _message_payload(
+            message_id=201,
+            content="อัปเดตแล้วเข้าไม่ได้ ต้องลงใหม่",
+            created_at=datetime(2026, 3, 23, 16, 20, tzinfo=timezone.utc),
+        )
+    )
+
+    service = DailyReportService(db=db, translator=translator)
+    service.generate_hourly_report_for_window(
+        report_date,
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+    )
+
+    service.generate_daily_report_from_hourly_reports(report_date)
+
+    assert translator.last_summary is not None
+    assert "action_hint" not in json.dumps(translator.last_summary, ensure_ascii=False)
 
 
 def test_generate_today_so_far_report_uses_today_window(tmp_path):
@@ -470,3 +577,147 @@ def test_generate_channel_today_text_report(tmp_path):
     assert report.source_message_count == 2
     assert report.candidate_message_count == 2
     assert "泰国 / 聊天室" in report.content_cn
+
+
+def test_feishu_notifier_sends_report_once(tmp_path):
+    db = _make_db(tmp_path)
+    report_date = date(2026, 3, 24)
+    db.upsert_daily_report(
+        _daily_report_payload(
+            report_date,
+            content_cn="# Global 日报\n\n今天有 4 个高优先级问题需要跟进。",
+        )
+    )
+
+    service = DailyReportService(db=db, translator=FakeTranslator())
+    client = FakeFeishuClient()
+    notifier = DailyReportFeishuNotifier(
+        db=db,
+        config=FeishuDeliveryConfig(
+            enabled=True,
+            webhook_url="https://open.feishu.test/hook/123",
+            keyword="日报",
+            title_prefix="Global 日报",
+        ),
+        client=client,
+    )
+
+    first = notifier.deliver_previous_day_report(
+        service,
+        now=datetime(2026, 3, 25, 9, 0, tzinfo=SHANGHAI_TZ),
+    )
+    second = notifier.deliver_previous_day_report(
+        service,
+        now=datetime(2026, 3, 25, 9, 10, tzinfo=SHANGHAI_TZ),
+    )
+
+    assert first.status == "sent"
+    assert first.sent_message_count == 1
+    assert second.status == "already_delivered"
+    assert len(client.messages) == 1
+    assert client.messages[0].startswith("日报 Global 日报 2026-03-24")
+
+
+def test_feishu_notifier_generates_missing_daily_report_from_hourly_reports(tmp_path):
+    db = _make_db(tmp_path)
+    report_date = date(2026, 3, 24)
+
+    db.upsert_message(
+        _message_payload(
+            message_id=101,
+            content="อัปเดตแล้วเข้าไม่ได้ ต้องลงใหม่",
+            created_at=datetime(2026, 3, 23, 16, 10, tzinfo=timezone.utc),
+        )
+    )
+    service = DailyReportService(db=db, translator=FakeTranslator())
+    service.generate_hourly_report_for_window(
+        report_date,
+        datetime(2026, 3, 23, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc),
+    )
+
+    client = FakeFeishuClient()
+    notifier = DailyReportFeishuNotifier(
+        db=db,
+        config=FeishuDeliveryConfig(
+            enabled=True,
+            webhook_url="https://open.feishu.test/hook/456",
+            title_prefix="Global 日报",
+        ),
+        client=client,
+    )
+
+    result = notifier.deliver_report_for_date(service, report_date=report_date)
+    stored = db.get_daily_report_by_date(report_date)
+
+    assert result.status == "sent"
+    assert stored is not None
+    assert stored.content_cn
+    assert len(client.messages) == 1
+
+
+def test_feishu_notifier_splits_long_report_into_multiple_messages(tmp_path):
+    db = _make_db(tmp_path)
+    report_date = date(2026, 3, 24)
+    long_body = "# Global 日报\n\n" + ("这是很长的日报内容。\n" * 120)
+    db.upsert_daily_report(_daily_report_payload(report_date, content_cn=long_body))
+
+    service = DailyReportService(db=db, translator=FakeTranslator())
+    client = FakeFeishuClient()
+    notifier = DailyReportFeishuNotifier(
+        db=db,
+        config=FeishuDeliveryConfig(
+            enabled=True,
+            webhook_url="https://open.feishu.test/hook/789",
+            keyword="日报",
+            title_prefix="Global 日报",
+            max_message_chars=320,
+        ),
+        client=client,
+    )
+
+    result = notifier.deliver_report_for_date(service, report_date=report_date)
+
+    assert result.status == "sent"
+    assert len(client.messages) >= 2
+    assert all(message.startswith("日报 Global 日报 2026-03-24") for message in client.messages)
+
+
+def test_run_previous_day_feishu_delivery_now_prints_sent_status(monkeypatch, capsys, tmp_path):
+    from src.reports.delivery import FeishuDeliveryResult
+    from src.reports.worker import run_previous_day_feishu_delivery_now
+
+    class StubNotifier:
+        def is_enabled(self) -> bool:
+            return True
+
+        def deliver_previous_day_report(self, service):
+            del service
+            return FeishuDeliveryResult(
+                status="sent",
+                report_date=date(2026, 3, 24),
+                scope_key="global",
+                sent_message_count=1,
+                report_found=True,
+            )
+
+    monkeypatch.setattr(
+        "src.reports.worker._build_runtime",
+        lambda config_path=None: (object(), StubNotifier()),
+    )
+
+    run_previous_day_feishu_delivery_now(config_path=str(tmp_path / "config.yaml"))
+    captured = capsys.readouterr()
+    assert "[feishu] sent date=2026-03-24 scope=global messages=1" in captured.out
+
+
+def test_build_translator_can_be_optional_when_llm_env_missing(monkeypatch):
+    from src.reports.worker import _build_translator
+
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    translator = _build_translator({}, required=False)
+
+    assert translator is None

@@ -35,6 +35,7 @@ def main() -> None:
             "init-db",
             "migrate-db",
             "daily-report-worker",
+            "daily-report-send-feishu",
             "daily-report-once",
             "daily-report-date",
             "channel-daily-report-worker",
@@ -71,6 +72,10 @@ def main() -> None:
         from .reports import run_daily_report_worker
 
         run_daily_report_worker(config_path=args.config)
+    elif args.command == "daily-report-send-feishu":
+        from .reports import run_previous_day_feishu_delivery_now
+
+        run_previous_day_feishu_delivery_now(config_path=args.config)
     elif args.command == "daily-report-once":
         if not args.now:
             parser.error("daily-report-once requires --now")

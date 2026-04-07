@@ -15,6 +15,7 @@ from .models import (
     DailyReport,
     HourlyReport,
     Message,
+    ReportDelivery,
 )
 
 
@@ -424,6 +425,48 @@ class Database:
         with self.session() as db:
             stmt = select(func.count()).select_from(DailyReport).where(DailyReport.scope_key == scope_key)
             return int(db.scalar(stmt) or 0)
+
+    # MARK: - Report Delivery CRUD
+    def upsert_report_delivery(self, payload: Dict[str, Any]) -> ReportDelivery:
+        with self.session() as db:
+            stmt = (
+                select(ReportDelivery)
+                .where(ReportDelivery.delivery_channel == payload["delivery_channel"])
+                .where(ReportDelivery.target_key == payload["target_key"])
+                .where(ReportDelivery.report_date == payload["report_date"])
+                .where(ReportDelivery.scope_key == payload["scope_key"])
+            )
+            existing = db.scalar(stmt)
+            if existing is None:
+                existing = ReportDelivery(**payload)
+                db.add(existing)
+                db.flush()
+                return existing
+
+            for key, value in payload.items():
+                if key == "id":
+                    continue
+                setattr(existing, key, value)
+            db.flush()
+            return existing
+
+    def get_report_delivery(
+        self,
+        *,
+        delivery_channel: str,
+        target_key: str,
+        report_date: date,
+        scope_key: str = "global",
+    ) -> Optional[ReportDelivery]:
+        with self.session() as db:
+            stmt = (
+                select(ReportDelivery)
+                .where(ReportDelivery.delivery_channel == delivery_channel)
+                .where(ReportDelivery.target_key == target_key)
+                .where(ReportDelivery.report_date == report_date)
+                .where(ReportDelivery.scope_key == scope_key)
+            )
+            return db.scalar(stmt)
 
     # MARK: - Hourly Report CRUD
     def upsert_hourly_report(self, payload: Dict[str, Any]) -> HourlyReport:

@@ -57,3 +57,8 @@ reporting:
     min_shard_chars: 4000
     max_shard_chars: 14000
     reserve_calls: 120
+  delivery:
+    feishu:
+      enabled: ${FEISHU_BOT_ENABLED:false}
+      webhook_url: ${FEISHU_BOT_WEBHOOK_URL:}
+
