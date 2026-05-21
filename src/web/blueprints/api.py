@@ -27,6 +27,13 @@ def _bounded_int_arg(name: str, default: int, *, minimum: int, maximum: int) -> 
     return max(minimum, min(maximum, value))
 
 
+def _bool_arg(name: str, default: bool = False) -> bool:
+    raw_value = request.args.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @bp.get("/api/health")
 def health() -> dict:
     return api_health()
@@ -52,11 +59,13 @@ def messages_browser() -> dict:
     page_size = _bounded_int_arg("page_size", 20, minimum=1, maximum=100)
     scope_key = request.args.get("scope_key")
     report_date = request.args.get("report_date")
+    all_messages = _bool_arg("all_messages")
     return api_get_messages_browser(
         scope_key=scope_key,
         report_date=report_date,
         page=page,
         page_size=page_size,
+        all_messages=all_messages,
     )
 
 

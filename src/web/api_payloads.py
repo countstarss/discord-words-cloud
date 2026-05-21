@@ -111,6 +111,7 @@ def get_messages_browser(
     report_date: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
+    all_messages: bool = False,
 ) -> dict:
     db = get_db()
     scopes = _message_browser_scopes()
@@ -121,11 +122,37 @@ def get_messages_browser(
             "available_dates": [],
             "selected_scope": None,
             "selected_date": None,
+            "all_messages": all_messages,
             "messages": [],
             "pagination": {"page": 1, "page_size": page_size, "total_items": 0, "total_pages": 0},
         }
 
     available_dates = [item.isoformat() for item in db.get_message_dates_for_scope(scope_key=selected_scope)]
+    if all_messages:
+        total_items = db.count_messages(scope_key=selected_scope)
+        total_pages = max(1, (total_items + page_size - 1) // page_size) if total_items else 0
+        current_page = min(page, total_pages or 1)
+        offset = (current_page - 1) * page_size
+        messages = db.get_all_messages(
+            limit=page_size,
+            offset=offset,
+            scope_key=selected_scope,
+        )
+        return {
+            "available_scopes": scopes,
+            "available_dates": available_dates,
+            "selected_scope": selected_scope,
+            "selected_date": None,
+            "all_messages": True,
+            "messages": [_serialize_message(message, include_cleaned_text=False) for message in messages],
+            "pagination": {
+                "page": current_page,
+                "page_size": page_size,
+                "total_items": total_items,
+                "total_pages": total_pages,
+            },
+        }
+
     if report_date:
         try:
             selected_date = date.fromisoformat(report_date)
@@ -152,6 +179,7 @@ def get_messages_browser(
         "available_dates": available_dates,
         "selected_scope": selected_scope,
         "selected_date": selected_date.isoformat(),
+        "all_messages": False,
         "messages": [_serialize_message(message, include_cleaned_text=False) for message in messages],
         "pagination": {
             "page": current_page,

@@ -5,6 +5,7 @@ document.addEventListener("DOMContentLoaded", () => {
     dates: [],
     selectedScope: null,
     selectedDate: null,
+    showAllMessages: false,
     page: 1,
     pageSize: 20,
     totalPages: 0,
@@ -17,6 +18,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const messageList = document.getElementById("messageList");
   const prevPage = document.getElementById("prevPage");
   const nextPage = document.getElementById("nextPage");
+  const exportMessagesCsv = document.getElementById("exportMessagesCsv");
+  const showAllMessages = document.getElementById("showAllMessages");
 
   function currentScopeLabel() {
     const match = state.scopes.find((scope) => scope.scope_key === state.selectedScope);
@@ -27,7 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
     state.scopes = payload.available_scopes || [];
     state.dates = payload.available_dates || [];
     state.selectedScope = payload.selected_scope || state.selectedScope;
-    state.selectedDate = payload.selected_date || state.selectedDate;
+    state.selectedDate = state.showAllMessages ? null : payload.selected_date || state.selectedDate;
 
     ui.populateSelect(
       scopeSelect,
@@ -41,12 +44,19 @@ document.addEventListener("DOMContentLoaded", () => {
       state.selectedDate,
       "No dates"
     );
+    if (dateSelect) {
+      dateSelect.disabled = state.showAllMessages;
+    }
+    if (showAllMessages) {
+      showAllMessages.checked = state.showAllMessages;
+    }
   }
 
   function renderHeader() {
     ui.setText("messageTitle", currentScopeLabel());
-    const meta =
-      state.selectedDate && state.totalItems
+    const meta = state.showAllMessages
+      ? `All content · ${Number(state.totalItems || 0).toLocaleString()} messages`
+      : state.selectedDate && state.totalItems
         ? `${state.selectedDate} · ${Number(state.totalItems).toLocaleString()} messages`
         : state.selectedDate
           ? `${state.selectedDate} · 0 messages`
@@ -62,6 +72,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (nextPage) {
       nextPage.disabled = !state.totalPages || state.page >= state.totalPages;
     }
+    if (exportMessagesCsv) {
+      exportMessagesCsv.disabled =
+        !state.selectedScope || (!state.showAllMessages && (!state.selectedDate || !state.dates.length));
+    }
   }
 
   function renderMessages() {
@@ -69,7 +83,9 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     if (!state.messages.length) {
-      messageList.innerHTML = '<div class="empty">No messages found for the selected scope and date.</div>';
+      messageList.innerHTML = state.showAllMessages
+        ? '<div class="empty">No messages found for the selected scope.</div>'
+        : '<div class="empty">No messages found for the selected scope and date.</div>';
       return;
     }
     messageList.innerHTML = state.messages
@@ -90,7 +106,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (state.selectedScope) {
       params.set("scope_key", state.selectedScope);
     }
-    if (state.selectedDate) {
+    if (state.showAllMessages) {
+      params.set("all_messages", "true");
+    } else if (state.selectedDate) {
       params.set("report_date", state.selectedDate);
     }
     params.set("page", String(state.page));
@@ -101,6 +119,7 @@ document.addEventListener("DOMContentLoaded", () => {
     state.page = Number(payload.pagination?.page || 1);
     state.totalPages = Number(payload.pagination?.total_pages || 0);
     state.totalItems = Number(payload.pagination?.total_items || 0);
+    state.showAllMessages = Boolean(payload.all_messages);
     renderFilters(payload);
     renderHeader();
     renderMessages();
@@ -109,7 +128,9 @@ document.addEventListener("DOMContentLoaded", () => {
   if (scopeSelect) {
     scopeSelect.addEventListener("change", async (event) => {
       state.selectedScope = event.target.value;
-      state.selectedDate = null;
+      if (!state.showAllMessages) {
+        state.selectedDate = null;
+      }
       state.page = 1;
       try {
         await loadMessages();
@@ -121,7 +142,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (dateSelect) {
     dateSelect.addEventListener("change", async (event) => {
+      if (state.showAllMessages) {
+        return;
+      }
       state.selectedDate = event.target.value;
+      state.page = 1;
+      try {
+        await loadMessages();
+      } catch (error) {
+        console.error(error);
+      }
+    });
+  }
+
+  if (showAllMessages) {
+    showAllMessages.addEventListener("change", async (event) => {
+      state.showAllMessages = event.target.checked;
       state.page = 1;
       try {
         await loadMessages();
@@ -156,6 +192,22 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (error) {
         console.error(error);
       }
+    });
+  }
+
+  if (exportMessagesCsv) {
+    exportMessagesCsv.addEventListener("click", () => {
+      if (!state.selectedScope || (!state.showAllMessages && (!state.selectedDate || !state.dates.length))) {
+        return;
+      }
+      const params = new URLSearchParams();
+      params.set("scope_key", state.selectedScope);
+      if (state.showAllMessages) {
+        params.set("all_messages", "true");
+      } else {
+        params.set("report_date", state.selectedDate);
+      }
+      window.location.href = `/messages/export.csv?${params.toString()}`;
     });
   }
 

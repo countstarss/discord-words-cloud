@@ -258,6 +258,16 @@ class Database:
                 stmt = stmt.where(Message.scope_key == scope_key)
             return list(db.scalars(stmt))
 
+    def get_messages_for_scope(self, *, scope_key: str) -> List[Message]:
+        with self.session() as db:
+            stmt = (
+                select(Message)
+                .where(Message.is_deleted.is_(False))
+                .where(Message.scope_key == scope_key)
+                .order_by(Message.created_at.asc(), Message.message_id.asc())
+            )
+            return list(db.scalars(stmt))
+
     def get_messages_page_for_window(
         self,
         window_start: datetime,
